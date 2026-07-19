@@ -10,4 +10,10 @@ COPY handler.py /handler.py
 # (базовый ищет в /runpod-volume/models, где у нас только битый абсолютный симлинк).
 COPY extra_model_paths.yaml /comfyui/extra_model_paths.yaml
 
+# Патч float.py от OOM на тяжёлых моделях (как на поде): выключаем stochastic rounding fp8,
+# который даёт пик памяти и роняет воркер на Wan/LTX/SCAIL 14B+.
+RUN if [ -f /comfyui/comfy/float.py ] && grep -q "_CK_STOCHASTIC_ROUNDING_AVAILABLE = True" /comfyui/comfy/float.py; then \
+      sed -i "0,/_CK_STOCHASTIC_ROUNDING_AVAILABLE = True/s//_CK_STOCHASTIC_ROUNDING_AVAILABLE = False  # patched OOM/" /comfyui/comfy/float.py; \
+    fi
+
 # requests уже есть в базовом образе (использует стоковый handler). Больше ничего не нужно.
