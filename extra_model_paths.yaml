@@ -1,0 +1,17 @@
+# Наши модели на сетевом томе лежат под /runpod-volume/comfyui/models/... (вложено в comfyui/).
+# Указываем ComfyUI искать их напрямую — не полагаемся на симлинк (он абсолютный /workspace → битый на serverless).
+runpod_worker_comfy:
+  base_path: /runpod-volume/comfyui
+  checkpoints: models/checkpoints/
+  diffusion_models: models/diffusion_models/
+  unet: models/diffusion_models/
+  clip: models/text_encoders/
+  text_encoders: models/text_encoders/
+  clip_vision: models/clip_vision/
+  configs: models/configs/
+  controlnet: models/controlnet/
+  embeddings: models/embeddings/
+  loras: models/loras/
+  upscale_models: models/upscale_models/
+  vae: models/vae/
+  geometry_estimation: models/geometry_estimation/
