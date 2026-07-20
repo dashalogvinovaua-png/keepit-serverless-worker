@@ -26,4 +26,15 @@ RUN cd /comfyui/custom_nodes \
  && (pip install --no-cache-dir facexlib onnxruntime opencv-python-headless || true) \
  && (pip install --no-cache-dir -r comfyui_controlnet_aux/requirements.txt || true)
 
+# Модели качества ВШИВАЕМ В ОБРАЗ (не на том) — не нужен под для скачки, работает сразу после ребилда.
+# CodeFormer+facexlib (лица), RealESRGAN (апскейл), DWPose (движение). ~600МБ, приемлемо.
+RUN set -e; cd /comfyui/models; \
+ mkdir -p facerestore_models facedetection upscale_models controlnet_aux/ckpts/yzd-v/DWPose; \
+ (wget -q -O facerestore_models/codeformer.pth https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth || true); \
+ (wget -q -O facedetection/detection_Resnet50_Final.pth https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth || true); \
+ (wget -q -O facedetection/parsing_parsenet.pth https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth || true); \
+ (wget -q -O upscale_models/RealESRGAN_x4plus.pth https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth || true); \
+ (wget -q -O controlnet_aux/ckpts/yzd-v/DWPose/yolox_l.onnx https://huggingface.co/yzd-v/DWPose/resolve/main/yolox_l.onnx || true); \
+ (wget -q -O controlnet_aux/ckpts/yzd-v/DWPose/dw-ll_ucoco_384.onnx https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx || true)
+
 # requests уже есть в базовом образе (использует стоковый handler).
