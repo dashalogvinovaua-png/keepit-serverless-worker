@@ -16,4 +16,14 @@ RUN if [ -f /comfyui/comfy/float.py ] && grep -q "_CK_STOCHASTIC_ROUNDING_AVAILA
       sed -i "0,/_CK_STOCHASTIC_ROUNDING_AVAILABLE = True/s//_CK_STOCHASTIC_ROUNDING_AVAILABLE = False  # patched OOM/" /comfyui/comfy/float.py; \
     fi
 
-# requests уже есть в базовом образе (использует стоковый handler). Больше ничего не нужно.
+# ── КАСТОМ-НОДЫ КАЧЕСТВА (макс улучшение результата) ──
+# facerestore_cf — восстановление лиц (CodeFormer): чинит ЗУБЫ, ГЛАЗА, кожу на AI-выходе (Wan/SCAIL).
+# comfyui_controlnet_aux — DWPose/depth препроцессоры: точный контроль ДВИЖЕНИЯ для Wan VACE (control=pose).
+# Модели к ним кладём на СЕТЕВОЙ ТОМ (codeformer.pth, dwpose, upscale) — см. scripts/dl_quality_models.py.
+RUN cd /comfyui/custom_nodes \
+ && (git clone --depth 1 https://github.com/mav-rik/facerestore_cf.git || true) \
+ && (git clone --depth 1 https://github.com/Fannovel16/comfyui_controlnet_aux.git || true) \
+ && (pip install --no-cache-dir facexlib onnxruntime opencv-python-headless || true) \
+ && (pip install --no-cache-dir -r comfyui_controlnet_aux/requirements.txt || true)
+
+# requests уже есть в базовом образе (использует стоковый handler).

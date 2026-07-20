@@ -13,5 +13,7 @@ runpod_worker_comfy:
   vae: models/vae/
   controlnet: models/controlnet/
   upscale_models: models/upscale_models/
+  facerestore_models: models/facerestore_models/
+  facedetection: models/facedetection/
   embeddings: models/embeddings/
   geometry_estimation: models/geometry_estimation/
