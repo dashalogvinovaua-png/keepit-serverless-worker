@@ -20,11 +20,16 @@ RUN if [ -f /comfyui/comfy/float.py ] && grep -q "_CK_STOCHASTIC_ROUNDING_AVAILA
 # facerestore_cf — восстановление лиц (CodeFormer): чинит ЗУБЫ, ГЛАЗА, кожу на AI-выходе (Wan/SCAIL).
 # comfyui_controlnet_aux — DWPose/depth препроцессоры: точный контроль ДВИЖЕНИЯ для Wan VACE (control=pose).
 # Модели к ним кладём на СЕТЕВОЙ ТОМ (codeformer.pth, dwpose, upscale) — см. scripts/dl_quality_models.py.
+# БЕЗ || true на clone → если клон упадёт, билд УПАДЁТ видимо (а не «зелёный» без ноды).
+# ВАЖНО: ставим requirements САМОЙ facerestore_cf (без них нода падает на импорте → ComfyUI её не видит).
 RUN cd /comfyui/custom_nodes \
- && (git clone --depth 1 https://github.com/mav-rik/facerestore_cf.git || true) \
- && (git clone --depth 1 https://github.com/Fannovel16/comfyui_controlnet_aux.git || true) \
- && (pip install --no-cache-dir facexlib onnxruntime opencv-python-headless || true) \
- && (pip install --no-cache-dir -r comfyui_controlnet_aux/requirements.txt || true)
+ && git clone --depth 1 https://github.com/mav-rik/facerestore_cf.git \
+ && git clone --depth 1 https://github.com/Fannovel16/comfyui_controlnet_aux.git \
+ && pip install --no-cache-dir facexlib onnxruntime opencv-python-headless \
+ && (pip install --no-cache-dir -r facerestore_cf/requirements.txt || true) \
+ && (pip install --no-cache-dir -r comfyui_controlnet_aux/requirements.txt || true) \
+ && python3 -c "import facexlib" \
+ && ls facerestore_cf/*.py
 
 # Модели качества ВШИВАЕМ В ОБРАЗ (не на том) — не нужен под для скачки, работает сразу после ребилда.
 # CodeFormer+facexlib (лица), RealESRGAN (апскейл), DWPose (движение). ~600МБ, приемлемо.
