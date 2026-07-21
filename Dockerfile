@@ -18,28 +18,25 @@ RUN if [ -f /comfyui/comfy/float.py ] && grep -q "_CK_STOCHASTIC_ROUNDING_AVAILA
 
 # ── КАСТОМ-НОДЫ КАЧЕСТВА (макс улучшение результата) ──
 # facerestore_cf — восстановление лиц (CodeFormer): чинит ЗУБЫ, ГЛАЗА, кожу на AI-выходе (Wan/SCAIL).
-# comfyui_controlnet_aux — DWPose/depth препроцессоры: точный контроль ДВИЖЕНИЯ для Wan VACE (control=pose).
+# ВНИМАНИЕ: comfyui_controlnet_aux УБРАН — ронял ComfyUI на старте воркера (unhealthy → джобы не берутся).
+#   Нужен был только для control=pose / hand-refiner (сейчас НЕ используются — движение идёт через control=raw).
 # Модели к ним кладём на СЕТЕВОЙ ТОМ (codeformer.pth, dwpose, upscale) — см. scripts/dl_quality_models.py.
 # БЕЗ || true на clone → если клон упадёт, билд УПАДЁТ видимо (а не «зелёный» без ноды).
 # ВАЖНО: ставим requirements САМОЙ facerestore_cf (без них нода падает на импорте → ComfyUI её не видит).
 RUN cd /comfyui/custom_nodes \
  && git clone --depth 1 https://github.com/mav-rik/facerestore_cf.git \
- && git clone --depth 1 https://github.com/Fannovel16/comfyui_controlnet_aux.git \
  && pip install --no-cache-dir facexlib onnxruntime opencv-python-headless \
  && (pip install --no-cache-dir -r facerestore_cf/requirements.txt || true) \
- && (pip install --no-cache-dir -r comfyui_controlnet_aux/requirements.txt || true) \
  && python3 -c "import facexlib" \
  && ls facerestore_cf/*.py
 
 # Модели качества ВШИВАЕМ В ОБРАЗ (не на том) — не нужен под для скачки, работает сразу после ребилда.
 # CodeFormer+facexlib (лица), RealESRGAN (апскейл), DWPose (движение). ~600МБ, приемлемо.
 RUN set -e; cd /comfyui/models; \
- mkdir -p facerestore_models facedetection upscale_models controlnet_aux/ckpts/yzd-v/DWPose; \
+ mkdir -p facerestore_models facedetection upscale_models; \
  (wget -q -O facerestore_models/codeformer.pth https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth || true); \
  (wget -q -O facedetection/detection_Resnet50_Final.pth https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth || true); \
  (wget -q -O facedetection/parsing_parsenet.pth https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth || true); \
- (wget -q -O upscale_models/RealESRGAN_x4plus.pth https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth || true); \
- (wget -q -O controlnet_aux/ckpts/yzd-v/DWPose/yolox_l.onnx https://huggingface.co/yzd-v/DWPose/resolve/main/yolox_l.onnx || true); \
- (wget -q -O controlnet_aux/ckpts/yzd-v/DWPose/dw-ll_ucoco_384.onnx https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx || true)
+ (wget -q -O upscale_models/RealESRGAN_x4plus.pth https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth || true)
 
 # requests уже есть в базовом образе (использует стоковый handler).
