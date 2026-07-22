@@ -23,12 +23,17 @@ RUN if [ -f /comfyui/comfy/float.py ] && grep -q "_CK_STOCHASTIC_ROUNDING_AVAILA
 # Модели к ним кладём на СЕТЕВОЙ ТОМ (codeformer.pth, dwpose, upscale) — см. scripts/dl_quality_models.py.
 # БЕЗ || true на clone → если клон упадёт, билд УПАДЁТ видимо (а не «зелёный» без ноды).
 # ВАЖНО: ставим requirements САМОЙ facerestore_cf (без них нода падает на импорте → ComfyUI её не видит).
+# ЗАКАЛКА: весь блок в guard. Если клон/деп/импорт упадёт — нода УДАЛЯЕТСЯ, ComfyUI грузится чисто
+# (иначе повторяем историю controlnet_aux: полуустановленная нода → unhealthy → джобы не берутся).
+# НЕ ставим facerestore_cf/requirements.txt вслепую — он тянет basicsr, который ломает torchvision
+# импорт и роняет ВЕСЬ ComfyUI на старте. Ставим только безопасные явные зависимости.
 RUN cd /comfyui/custom_nodes \
- && git clone --depth 1 https://github.com/mav-rik/facerestore_cf.git \
- && pip install --no-cache-dir facexlib onnxruntime opencv-python-headless \
- && (pip install --no-cache-dir -r facerestore_cf/requirements.txt || true) \
- && python3 -c "import facexlib" \
- && ls facerestore_cf/*.py
+ && ( git clone --depth 1 https://github.com/mav-rik/facerestore_cf.git \
+      && pip install --no-cache-dir facexlib onnxruntime opencv-python-headless \
+      && python3 -c "import facexlib, onnxruntime" \
+      && ls facerestore_cf/*.py \
+    ) || ( echo "!! facerestore_cf установка провалилась — удаляю ноду, чтобы ComfyUI грузился" \
+      && rm -rf facerestore_cf )
 
 # Модели качества ВШИВАЕМ В ОБРАЗ (не на том) — не нужен под для скачки, работает сразу после ребилда.
 # CodeFormer+facexlib (лица), RealESRGAN (апскейл), DWPose (движение). ~600МБ, приемлемо.
