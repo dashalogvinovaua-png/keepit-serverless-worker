@@ -41,9 +41,15 @@ RUN set -e; cd /comfyui/models; \
 
 # ── ReActor: ТОЧНАЯ пересадка лица (face-swap, InsightFace inswapper) → 100% совпадение лица блогера ──
 # После генерации копии вставляем ТОЧНОЕ лицо блогера в каждый кадр (не «похожее», а его).
-# onnxruntime-gpu вместо cpu-версии (facerestore ставил cpu) — иначе свап медленный.
+# insightface==0.7.3 собирается ИЗ ИСХОДНИКОВ (нет готового wheel) → нужны компилятор + заголовки + numpy/cython.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev cmake unzip \
+ && rm -rf /var/lib/apt/lists/*
+# onnxruntime-gpu вместо cpu (facerestore ставил cpu) — иначе свап медленный. Отдельным шагом.
 RUN pip uninstall -y onnxruntime 2>/dev/null || true; \
-    pip install --no-cache-dir onnxruntime-gpu insightface==0.7.3
+    pip install --no-cache-dir onnxruntime-gpu
+# numpy<2 + cython ДО insightface (иначе сборка падает), затем сам insightface.
+RUN pip install --no-cache-dir "numpy<2" cython \
+ && pip install --no-cache-dir insightface==0.7.3
 RUN cd /comfyui/custom_nodes \
  && git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
  && (pip install --no-cache-dir -r ComfyUI-ReActor/requirements.txt || true) \
