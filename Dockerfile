@@ -39,4 +39,20 @@ RUN set -e; cd /comfyui/models; \
  (wget -q -O facedetection/parsing_parsenet.pth https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth || true); \
  (wget -q -O upscale_models/RealESRGAN_x4plus.pth https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth || true)
 
+# ── ReActor: ТОЧНАЯ пересадка лица (face-swap, InsightFace inswapper) → 100% совпадение лица блогера ──
+# После генерации копии вставляем ТОЧНОЕ лицо блогера в каждый кадр (не «похожее», а его).
+# onnxruntime-gpu вместо cpu-версии (facerestore ставил cpu) — иначе свап медленный.
+RUN pip uninstall -y onnxruntime 2>/dev/null || true; \
+    pip install --no-cache-dir onnxruntime-gpu insightface==0.7.3
+RUN cd /comfyui/custom_nodes \
+ && git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
+ && (pip install --no-cache-dir -r ComfyUI-ReActor/requirements.txt || true) \
+ && python3 -c "import insightface, onnxruntime; print('reactor deps ok')" \
+ && ls ComfyUI-ReActor/*.py
+# Модели ReActor В ОБРАЗ: inswapper (свап-модель) + buffalo_l (детекция/распознавание лиц).
+RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insightface; \
+ (wget -q -O inswapper_128.onnx https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx || true); \
+ (cd models && wget -q -O buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
+   && mkdir -p buffalo_l && (cd buffalo_l && unzip -oq ../buffalo_l.zip) && rm -f buffalo_l.zip || true)
+
 # requests уже есть в базовом образе (использует стоковый handler).
