@@ -40,21 +40,23 @@ RUN set -e; cd /comfyui/models; \
  (wget -q -O upscale_models/RealESRGAN_x4plus.pth https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth || true)
 
 # ── ReActor: ТОЧНАЯ пересадка лица (face-swap, InsightFace inswapper) → 100% совпадение лица блогера ──
-# После генерации копии вставляем ТОЧНОЕ лицо блогера в каждый кадр (не «похожее», а его).
-# insightface==0.7.3 собирается ИЗ ИСХОДНИКОВ (нет готового wheel) → нужны компилятор + заголовки + numpy/cython.
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev cmake unzip \
- && rm -rf /var/lib/apt/lists/*
-# onnxruntime-gpu вместо cpu (facerestore ставил cpu) — иначе свап медленный. Отдельным шагом.
-RUN pip uninstall -y onnxruntime 2>/dev/null || true; \
-    pip install --no-cache-dir onnxruntime-gpu
-# numpy<2 + cython ДО insightface (иначе сборка падает), затем сам insightface.
-RUN pip install --no-cache-dir "numpy<2" cython \
- && pip install --no-cache-dir insightface==0.7.3
+# Шаги установки МЯГКИЕ (|| true), но ФИНАЛЬНАЯ проверка ЖЁСТКАЯ: если insightface не импортится
+# или ноды нет — билд ПАДАЕТ (безопасно, RunPod оставит старый рабочий образ; сломанный не поедет).
+# Компилятор для сборки insightface (нет готового wheel под нашу версию python):
+RUN (apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev cmake unzip && rm -rf /var/lib/apt/lists/*) || true
+RUN (pip uninstall -y onnxruntime 2>/dev/null || true); (pip install --no-cache-dir onnxruntime-gpu || true)
+RUN pip install --no-cache-dir "numpy<2" cython || true
+# insightface: сначала из PyPI (соберётся, если есть компилятор), иначе готовый wheel от автора ReActor.
+RUN pip install --no-cache-dir insightface==0.7.3 \
+ || pip install --no-cache-dir https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp311-cp311-linux_x86_64.whl \
+ || true
 RUN cd /comfyui/custom_nodes \
- && git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
- && (pip install --no-cache-dir -r ComfyUI-ReActor/requirements.txt || true) \
- && python3 -c "import insightface, onnxruntime; print('reactor deps ok')" \
- && ls ComfyUI-ReActor/*.py
+ && (git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
+     || git clone --depth 1 https://codeberg.org/Gourieff/comfyui-reactor.git ComfyUI-ReActor) \
+ && (pip install --no-cache-dir -r ComfyUI-ReActor/requirements.txt || true)
+# ЖЁСТКАЯ ФИНАЛЬНАЯ ПРОВЕРКА (без неё сломанный образ не выпускаем):
+RUN python3 -c "import insightface, onnxruntime; print('insightface OK')" \
+ && ls /comfyui/custom_nodes/ComfyUI-ReActor/*.py
 # Модели ReActor В ОБРАЗ: inswapper (свап-модель) + buffalo_l (детекция/распознавание лиц).
 RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insightface; \
  (wget -q -O inswapper_128.onnx https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx || true); \
