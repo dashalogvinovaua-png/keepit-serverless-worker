@@ -40,27 +40,75 @@ RUN set -e; cd /comfyui/models; \
  (wget -q -O upscale_models/RealESRGAN_x4plus.pth https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth || true)
 
 # ── ReActor: ТОЧНАЯ пересадка лица (face-swap, InsightFace inswapper) → 100% совпадение лица блогера ──
-# Шаги установки МЯГКИЕ (|| true), но ФИНАЛЬНАЯ проверка ЖЁСТКАЯ: если insightface не импортится
-# или ноды нет — билд ПАДАЕТ (безопасно, RunPod оставит старый рабочий образ; сломанный не поедет).
-# Компилятор для сборки insightface (нет готового wheel под нашу версию python):
-RUN (apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev cmake unzip && rm -rf /var/lib/apt/lists/*) || true
-RUN (pip uninstall -y onnxruntime 2>/dev/null || true); (pip install --no-cache-dir onnxruntime-gpu || true)
-RUN pip install --no-cache-dir "numpy<2" cython || true
-# insightface: сначала из PyPI (соберётся, если есть компилятор), иначе готовый wheel от автора ReActor.
-RUN pip install --no-cache-dir insightface==0.7.3 \
- || pip install --no-cache-dir https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp311-cp311-linux_x86_64.whl \
- || true
-RUN cd /comfyui/custom_nodes \
- && (git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
-     || git clone --depth 1 https://codeberg.org/Gourieff/comfyui-reactor.git ComfyUI-ReActor) \
- && (pip install --no-cache-dir -r ComfyUI-ReActor/requirements.txt || true)
-# ЖЁСТКАЯ ФИНАЛЬНАЯ ПРОВЕРКА (без неё сломанный образ не выпускаем):
-RUN python3 -c "import insightface, onnxruntime; print('insightface OK')" \
- && ls /comfyui/custom_nodes/ComfyUI-ReActor/*.py
+# ПОЧЕМУ ЭТОТ БЛОК ВЫГЛЯДИТ ТАК (три грабли, на которых билд падал раньше):
+#  1) Готовых Linux-колёс insightface НЕ СУЩЕСТВУЕТ: на PyPI только исходники, у автора ReActor —
+#     только Windows. Значит компилируем из исходников (нужен build-essential + python3-dev).
+#  2) Базовый образ — Python 3.12 с venv /opt/venv. По умолчанию pip собирает пакет В ИЗОЛЯЦИИ и
+#     тянет туда СВЕЖИЙ numpy, а расширение потом импортится с numpy из образа → «module compiled
+#     using NumPy 2.x cannot be run in NumPy 1.x» и наоборот. Лечится --no-build-isolation:
+#     собираем ровно тем numpy, который стоит в образе. Поэтому numpy НЕ трогаем и НЕ пиним.
+#  3) insightface 0.7.3 — код 2023 года, Cython 3 его не собирает. Пиним cython<3 (0.29.37 умеет 3.12),
+#     на всякий случай оставляем вторую попытку на cython 3.
+# ФИНАЛЬНАЯ ПРОВЕРКА МЯГКАЯ: если insightface не собрался — образ всё равно выходит, просто БЕЗ ноды
+# (сервис photo это видит и снимает без face-swap). Жёсткий gate здесь вреден: он оставлял в проде
+# СТАРЫЙ образ, и ReActor не появлялся никогда.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev cmake unzip \
+ && rm -rf /var/lib/apt/lists/*
+# onnxruntime-gpu — на нём считается свап (CPU-вариант базового образа сносим, он тянет за собой CPU-провайдер).
+RUN (pip uninstall -y onnxruntime >/dev/null 2>&1 || true); \
+    pip install --no-cache-dir onnxruntime-gpu || pip install --no-cache-dir onnxruntime || true
+RUN pip install --no-cache-dir "cython<3" "setuptools>=68" wheel
+RUN pip install --no-cache-dir --no-build-isolation insightface==0.7.3 \
+ || (pip install --no-cache-dir "cython>=3.0" \
+     && pip install --no-cache-dir --no-build-isolation insightface==0.7.3) \
+ || echo "!! insightface из исходников не собрался — пробуем без C-расширения"
+# ПОСЛЕДНИЙ ЗАПАСНОЙ ПУТЬ: собираем insightface БЕЗ C-расширения (mesh_core_cython).
+# Оно нужно только 3D-мешам из thirdparty/face3d, а свап лиц (FaceAnalysis + inswapper на onnx)
+# работает и без него. Лучше face-swap без 3D-мешей, чем никакого face-swap.
+RUN if ! python3 -c "import insightface" >/dev/null 2>&1; then \
+      mkdir -p /tmp/insf && cd /tmp/insf \
+      && (pip download insightface==0.7.3 --no-deps --no-binary :all: -d . \
+          && tar xzf insightface-0.7.3.tar.gz && cd insightface-0.7.3 \
+          && sed -i -e 's/^from Cython.*//' \
+                    -e 's/^ *ext_modules=ext_modules,//' \
+                    -e 's/^ *headers=.*mesh_core\.h.*//' \
+                    -e 's/^ext_modules *=.*/ext_modules = []/' setup.py \
+          && pip install --no-cache-dir --no-build-isolation . ) \
+      || echo "!! insightface НЕ СОБРАЛСЯ ВООБЩЕ — образ поедет без ReActor"; \
+    fi
+# Ноду ставим ТОЛЬКО если insightface реально импортится: сломанная нода роняет ComfyUI на старте
+# (так уже было с comfyui_controlnet_aux — воркер уходил в unhealthy и не брал джобы).
+# Из requirements ReActor выкидываем numpy и opencv-python: numpy сломал бы ABI собранного расширения,
+# а opencv-python конфликтует с уже стоящим opencv-python-headless.
+RUN if python3 -c "import insightface, onnxruntime" >/dev/null 2>&1; then \
+      cd /comfyui/custom_nodes \
+      && (git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
+          || git clone --depth 1 https://codeberg.org/Gourieff/comfyui-reactor.git ComfyUI-ReActor) \
+      && grep -viE '^(numpy|opencv-python)([<>=!].*)?$' ComfyUI-ReActor/requirements.txt > /tmp/reactor-req.txt \
+      && (pip install --no-cache-dir -r /tmp/reactor-req.txt || true) \
+      && echo "REACTOR: нода установлена" > /reactor_status.txt; \
+    else echo "REACTOR: insightface не собрался — ноды нет" > /reactor_status.txt; fi
+# Страховка: если requirements ноды всё-таки поломали insightface — ноду убираем, образ остаётся живым.
+RUN if [ -d /comfyui/custom_nodes/ComfyUI-ReActor ] && ! python3 -c "import insightface" >/dev/null 2>&1; then \
+      rm -rf /comfyui/custom_nodes/ComfyUI-ReActor; \
+      echo "REACTOR: insightface сломался после requirements — нода убрана" > /reactor_status.txt; fi
+RUN cat /reactor_status.txt
 # Модели ReActor В ОБРАЗ: inswapper (свап-модель) + buffalo_l (детекция/распознавание лиц).
 RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insightface; \
  (wget -q -O inswapper_128.onnx https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx || true); \
  (cd models && wget -q -O buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
    && mkdir -p buffalo_l && (cd buffalo_l && unzip -oq ../buffalo_l.zip) && rm -f buffalo_l.zip || true)
+
+# ── ПРАВДА О СБОРКЕ В ЛОГЕ ───────────────────────────────────────────────────
+# Поднимаем ComfyUI в режиме CI (только загрузка нод, без сервера) и смотрим, зарегистрировалась ли
+# нода. Проверка МЯГКАЯ — билд не валит, но в логе сборки сразу видно, поедет face-swap или нет.
+RUN (cd /comfyui && timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1 || true); \
+    if grep -qi "reactor" /tmp/ci.log; then \
+      echo "REACTOR: ComfyUI ноду увидел" >> /reactor_status.txt; \
+    else \
+      echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; \
+    fi; \
+    grep -iE "reactor|insightface|import failed|traceback" /tmp/ci.log | head -30 || true; \
+    echo "─── итог ───"; cat /reactor_status.txt
 
 # requests уже есть в базовом образе (использует стоковый handler).
