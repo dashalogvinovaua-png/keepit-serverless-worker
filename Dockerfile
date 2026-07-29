@@ -111,4 +111,47 @@ RUN (cd /comfyui && timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/
     grep -iE "reactor|insightface|import failed|traceback" /tmp/ci.log | head -30 || true; \
     echo "─── итог ───"; cat /reactor_status.txt
 
+# ── ЗВУК: ноды речи и музыки для сервиса audio (platform/services/audio) ─────
+# Речь  — ComfyUI-Qwen3-TTS: Qwen3-TTS 1.7B (Apache 2.0), 10 языков включая русский,
+#         готовые тембры (Qwen3CustomVoice), голос по описанию (Qwen3VoiceDesign),
+#         клон по образцу (Qwen3VoiceClone).
+# Музыка — ComfyUI-RT-HeartMuLa: HeartMuLa-3B (Apache 2.0) — песня с вокалом по тексту и тегам,
+#         до 240 секунд за проход, выход 48 кГц.
+# ВЕСА В ОБРАЗ НЕ КЛАДЁМ (16 ГБ) — они живут на сетевом томе, см. dl_audio_models.py.
+#
+# ГЛАВНАЯ ОПАСНОСТЬ. В requirements обоих пакетов torch/numpy/transformers записаны БЕЗ версий,
+# а torchtune/torchao умеют тянуть свою сборку torch. Молчаливый апгрейд torch в этом образе =
+# встали Wan, LTX, SCAIL и ReActor, то есть вся видео- и фото-часть фермы. Поэтому:
+#   1) собираем constraints из УЖЕ установленных версий — pip не имеет права их менять;
+#   2) шаги установки мягкие (|| true): аудио не должно ронять сборку общего воркера;
+#   3) ниже — ЖЁСТКАЯ проверка, что torch остался прежним. Если сдвинулся, билд падает,
+#      и RunPod просто оставит старый рабочий образ.
+RUN python3 -c "import torch, torchvision; print(torch.__version__)" > /tmp/torch_before.txt; \
+    pip freeze 2>/dev/null | grep -iE '^(torch|torchvision|torchaudio|numpy)==' > /tmp/audio_constraints.txt; \
+    echo "── зафиксировано перед установкой аудио-нод ──"; cat /tmp/audio_constraints.txt
+RUN cd /comfyui/custom_nodes \
+ && (git clone --depth 1 https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git || true) \
+ && (pip install --no-cache-dir -c /tmp/audio_constraints.txt -r ComfyUI-Qwen3-TTS/requirements.txt || true) \
+ && (git clone --depth 1 https://github.com/monnky/ComfyUI-RT-HeartMuLa.git || true) \
+ && (pip install --no-cache-dir -c /tmp/audio_constraints.txt -r ComfyUI-RT-HeartMuLa/requirements.txt || true) \
+ && ls -d ComfyUI-Qwen3-TTS ComfyUI-RT-HeartMuLa || true
+# ЖЁСТКО: torch тот же, что был. Иначе образ не выпускаем.
+RUN python3 -c "\
+import torch;\
+before=open('/tmp/torch_before.txt').read().strip();\
+assert torch.__version__==before, 'torch сдвинулся: %s → %s' % (before, torch.__version__);\
+print('torch не тронут:', before)"
+
+# Куда ноды смотрят за весами на томе (extra_model_paths.yaml уже указывает на /runpod-volume/comfyui/models).
+RUN mkdir -p /comfyui/models/Qwen3-TTS /comfyui/models/HeartMuLa
+
+# Правда о звуке в логе сборки: зарегистрировались ли ноды (мягко, билд не валим).
+RUN (cd /comfyui && timeout 900 python main.py --quick-test-for-ci --cpu > /tmp/ci_audio.log 2>&1 || true); \
+    for n in Qwen3CustomVoice Qwen3VoiceDesign Qwen3VoiceClone HeartMuLaLoader HeartMuLaGenerator SaveAudio; do \
+      if grep -qi "$n" /tmp/ci_audio.log; then echo "AUDIO: $n ok" >> /audio_status.txt; \
+      else echo "AUDIO: $n НЕ ВИДЕН" >> /audio_status.txt; fi; \
+    done; \
+    grep -iE "qwen3|heartmula|import failed|traceback" /tmp/ci_audio.log | head -30 || true; \
+    echo "─── звук ───"; cat /audio_status.txt
+
 # requests уже есть в базовом образе (использует стоковый handler).
