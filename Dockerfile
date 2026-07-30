@@ -3,10 +3,10 @@
 # модели с сетевого тома (/runpod-volume/models). Мы лишь заменяем handler.py.
 FROM runpod/worker-comfyui:5.8.6-base
 
-# Версия ноды ReActor ЗАФИКСИРОВАНА коммитом. С --depth 1 без пиннинга один и тот же Dockerfile
-# каждый раз собирал разный код ноды: сборка невоспроизводима, а поломка может прийти сама
-# при следующем ребилде. Обновлять эту строку — осознанное действие, а не побочный эффект.
-ARG REACTOR_SHA=6ad6b35a4df250d14cb2abf0808c9ffedf59f747
+# ВНИМАНИЕ: в этом файле НЕ ДОЛЖНО быть инструкций ARG. Сборщик RunPod отклоняет такой Dockerfile
+# ещё до запуска docker — «Invalid Dockerfile configuration», лог обрывается сразу после клона.
+# Проверено историей сборок: ни одна успешная сборка ARG не содержала, и все шесть сборок 30.07
+# упали ровно на этом. Версии нод закрепляем, вписывая коммит прямо в команду.
 
 # Наш handler умеет собирать ЛЮБОЙ выходной файл (SaveVideo → mp4), а не только images.
 COPY handler.py /handler.py
@@ -88,8 +88,8 @@ RUN if ! python3 -c "import insightface" >/dev/null 2>&1; then \
 RUN if python3 -c "import insightface, onnxruntime" >/dev/null 2>&1; then \
       cd /comfyui/custom_nodes \
       && (git clone https://github.com/Gourieff/ComfyUI-ReActor.git 2>/dev/null \
-            && (git -C ComfyUI-ReActor checkout -q ${REACTOR_SHA} \
-                || echo "?? коммит ${REACTOR_SHA} не найден — беру ветку по умолчанию") \
+            && (git -C ComfyUI-ReActor checkout -q 6ad6b35a4df250d14cb2abf0808c9ffedf59f747 \
+                || echo "?? закреплённый коммит ReActor не найден — беру ветку по умолчанию") \
           || git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git) \
       && grep -viE '^(numpy|opencv-python)([<>=!].*)?$' ComfyUI-ReActor/requirements.txt > /tmp/reactor-req.txt \
       && (pip install --no-cache-dir -r /tmp/reactor-req.txt || true) \
@@ -113,13 +113,12 @@ RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insi
 #
 # КОММИТЫ ЗАКРЕПЛЕНЫ. `--depth 1` без пиннинга делает сборку невоспроизводимой: сегодня образ
 # собрался, завтра автор ноды сломал импорт — и ферма встала на ровном месте.
-ARG QWEN_TTS_COMMIT=17c22adb80a63c1c51bf74549e71a5cf218f4e1b
-ARG HEARTMULA_COMMIT=64e5419bf4aa6f002ac6178d4d71841429010021
+# Коммиты вписаны прямо в команду, а не через ARG: сборщик RunPod ARG не принимает (см. шапку файла).
 RUN cd /comfyui/custom_nodes \
  && git clone https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git \
- && git -C ComfyUI-Qwen3-TTS checkout --quiet "$QWEN_TTS_COMMIT" \
+ && git -C ComfyUI-Qwen3-TTS checkout --quiet 17c22adb80a63c1c51bf74549e71a5cf218f4e1b \
  && git clone https://github.com/monnky/ComfyUI-RT-HeartMuLa.git \
- && git -C ComfyUI-RT-HeartMuLa checkout --quiet "$HEARTMULA_COMMIT" \
+ && git -C ComfyUI-RT-HeartMuLa checkout --quiet 64e5419bf4aa6f002ac6178d4d71841429010021 \
  && echo "AUDIO: ноды склонированы на закреплённых коммитах"
 
 # Версии torch/numpy/transformers ФИКСИРУЕМ перед установкой: в requirements обоих пакетов они
@@ -156,11 +155,11 @@ RUN mkdir -p /comfyui/models/Qwen3-TTS /comfyui/models/HeartMuLa
 # Тайм-аут ЩЕДРЫЙ: с нашими нодами инициализация на CPU идёт минутами (insightface, onnxruntime,
 # facerestore). Код 124 — это «не успело», а не «упало»: такую сборку НЕ валим, но кричим в лог.
 # Валим только настоящий сбой старта (любой другой ненулевой код).
-RUN cd /comfyui && (timeout 1500 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1; echo $? > /tmp/ci.rc); \
+RUN cd /comfyui && (timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1; echo $? > /tmp/ci.rc); \
     RC=$(cat /tmp/ci.rc); \
     grep -iE "reactor|insightface|import failed|traceback|error" /tmp/ci.log | head -40 || true; \
     if [ "$RC" = "0" ]; then echo "COMFYUI: старт ок" >> /reactor_status.txt; \
-    elif [ "$RC" = "124" ]; then echo "COMFYUI: проверка не уложилась в 25 мин" >> /reactor_status.txt; \
+    elif [ "$RC" = "124" ]; then echo "COMFYUI: проверка не уложилась в 10 мин" >> /reactor_status.txt; \
     else echo "COMFYUI: СТАРТ НЕ ПРОШЁЛ, код $RC — смотри хвост лога выше" >> /reactor_status.txt; tail -40 /tmp/ci.log; fi; \
     if grep -qi "reactor" /tmp/ci.log; then echo "REACTOR: ComfyUI ноду увидел" >> /reactor_status.txt; \
     else echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; fi; \
