@@ -3,11 +3,6 @@
 # модели с сетевого тома (/runpod-volume/models). Мы лишь заменяем handler.py.
 FROM runpod/worker-comfyui:5.8.6-base
 
-# ВНИМАНИЕ: в этом файле НЕ ДОЛЖНО быть инструкций ARG. Сборщик RunPod отклоняет такой Dockerfile
-# ещё до запуска docker — «Invalid Dockerfile configuration», лог обрывается сразу после клона.
-# Проверено историей сборок: ни одна успешная сборка ARG не содержала, и все шесть сборок 30.07
-# упали ровно на этом. Версии нод закрепляем, вписывая коммит прямо в команду.
-
 # Наш handler умеет собирать ЛЮБОЙ выходной файл (SaveVideo → mp4), а не только images.
 COPY handler.py /handler.py
 
@@ -87,10 +82,8 @@ RUN if ! python3 -c "import insightface" >/dev/null 2>&1; then \
 # а opencv-python конфликтует с уже стоящим opencv-python-headless.
 RUN if python3 -c "import insightface, onnxruntime" >/dev/null 2>&1; then \
       cd /comfyui/custom_nodes \
-      && (git clone https://github.com/Gourieff/ComfyUI-ReActor.git 2>/dev/null \
-            && (git -C ComfyUI-ReActor checkout -q 6ad6b35a4df250d14cb2abf0808c9ffedf59f747 \
-                || echo "?? закреплённый коммит ReActor не найден — беру ветку по умолчанию") \
-          || git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git) \
+      && (git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
+          || git clone --depth 1 https://codeberg.org/Gourieff/comfyui-reactor.git ComfyUI-ReActor) \
       && grep -viE '^(numpy|opencv-python)([<>=!].*)?$' ComfyUI-ReActor/requirements.txt > /tmp/reactor-req.txt \
       && (pip install --no-cache-dir -r /tmp/reactor-req.txt || true) \
       && echo "REACTOR: нода установлена" > /reactor_status.txt; \
@@ -106,80 +99,16 @@ RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insi
  (cd models && wget -q -O buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
    && mkdir -p buffalo_l && (cd buffalo_l && unzip -oq ../buffalo_l.zip) && rm -f buffalo_l.zip || true)
 
-# ── ЗВУК: ноды речи и музыки для сервиса audio (platform/services/audio) ─────
-# Речь  — ComfyUI-Qwen3-TTS (Qwen3-TTS 1.7B, Apache 2.0): готовые тембры, голос по описанию, клон.
-# Музыка — ComfyUI-RT-HeartMuLa (HeartMuLa-3B, Apache 2.0): песня с вокалом по тексту и тегам.
-# Веса (~16 ГБ) в образ НЕ кладём — они на сетевом томе, см. dl_audio_models.py.
-#
-# КОММИТЫ ЗАКРЕПЛЕНЫ. `--depth 1` без пиннинга делает сборку невоспроизводимой: сегодня образ
-# собрался, завтра автор ноды сломал импорт — и ферма встала на ровном месте.
-# Коммиты вписаны прямо в команду, а не через ARG: сборщик RunPod ARG не принимает (см. шапку файла).
-RUN cd /comfyui/custom_nodes \
- && git clone https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git \
- && git -C ComfyUI-Qwen3-TTS checkout --quiet 17c22adb80a63c1c51bf74549e71a5cf218f4e1b \
- && git clone https://github.com/monnky/ComfyUI-RT-HeartMuLa.git \
- && git -C ComfyUI-RT-HeartMuLa checkout --quiet 64e5419bf4aa6f002ac6178d4d71841429010021 \
- && echo "AUDIO: ноды склонированы на закреплённых коммитах"
-
-# Версии torch/numpy/transformers ФИКСИРУЕМ перед установкой: в requirements обоих пакетов они
-# записаны без версий, а подмена torch ломает Wan/LTX/SCAIL/ReActor — то есть всю видео- и фото-часть.
-RUN pip freeze 2>/dev/null | grep -iE '^(torch|torchvision|torchaudio|numpy|transformers)==' > /tmp/audio_con.txt; \
-    echo "── зафиксировано перед аудио-нодами ──"; cat /tmp/audio_con.txt
-# Цикл развёрнут в две команды: подстановок переменных в файле быть не должно (см. шапку файла).
-RUN grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
-      /comfyui/custom_nodes/ComfyUI-Qwen3-TTS/requirements.txt > /tmp/req-tts.txt; \
-    pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req-tts.txt \
-      || echo "!! requirements Qwen3-TTS встали не полностью — гейт старта покажет, жива ли нода"
-RUN grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
-      /comfyui/custom_nodes/ComfyUI-RT-HeartMuLa/requirements.txt > /tmp/req-mula.txt; \
-    pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req-mula.txt \
-      || echo "!! requirements HeartMuLa встали не полностью — гейт старта покажет, жива ли нода"
-# torch обязан остаться прежним: если сдвинулся — образ не выпускаем.
-RUN python3 -c "import torch; want=[l.split('==')[1].strip() for l in open('/tmp/audio_con.txt') if l.lower().startswith('torch==')]; assert not want or torch.__version__==want[0], 'torch сдвинулся: %s -> %s' % (want[0], torch.__version__); print('torch не тронут:', torch.__version__)"
-
-# Папки, куда ноды смотрят за весами на томе (extra_model_paths.yaml уже указывает на том).
-RUN mkdir -p /comfyui/models/Qwen3-TTS /comfyui/models/HeartMuLa
-
-# ── ГЛАВНЫЙ ГЕЙТ: COMFYUI ОБЯЗАН СТАРТОВАТЬ ─────────────────────────────────
-# ЭТА ПРОВЕРКА ДОЛЖНА ОСТАВАТЬСЯ ПОСЛЕДНЕЙ В ФАЙЛЕ. Всё, что добавляется ниже, ею не проверено.
-#
-# Зачем жёстко. Битая кастом-нода роняет ComfyUI на старте, но контейнер при этом поднимается,
-# RunPod считает воркер живым — и задачи просто копятся в очереди. Ферма молчит, а причина не видна
-# ни в одном ответе API. Мягкая проверка такую сборку пропускала: она лишь писала строчку в лог.
-# ПОЧЕМУ СЕЙЧАС ПРЕДУПРЕЖДЕНИЕ, А НЕ ПАДЕНИЕ. Я сделал этот гейт жёстким — и обе сборки упали,
-# заблокировав выпуск образов вообще, включая чужие. Гейт, который валит ВСЁ, вреднее отсутствия
-# гейта: он не защищает, а останавливает работу. Пока не разобран лог падения, проверка пишет
-# результат в /reactor_status.txt и в лог сборки, но выпуску не мешает. Вернуть жёсткость —
-# отдельным осознанным шагом, когда будет понятно, почему проверка не проходит.
-# Тайм-аут ЩЕДРЫЙ: с нашими нодами инициализация на CPU идёт минутами (insightface, onnxruntime,
-# facerestore). Код 124 — это «не успело», а не «упало»: такую сборку НЕ валим, но кричим в лог.
-# Валим только настоящий сбой старта (любой другой ненулевой код).
-# Код возврата команды не читаем: любых подстановок переменных в Dockerfile сборщик RunPod
-# не принимает (см. шапку файла). Судим по логу — гейт всё равно только предупреждает.
-RUN (cd /comfyui && timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1 \
-      || echo "COMFYUI-CI: старт завершился ненулевым кодом (или не уложился в 10 минут)" >> /tmp/ci.log); \
-    grep -iE "reactor|insightface|import failed|traceback|error" /tmp/ci.log | head -40 || true; \
-    if grep -q "COMFYUI-CI: старт завершился" /tmp/ci.log; then \
-      echo "COMFYUI: старт НЕ прошёл чисто — смотри хвост лога" >> /reactor_status.txt; tail -40 /tmp/ci.log; \
-    else echo "COMFYUI: старт ок" >> /reactor_status.txt; fi; \
-    if grep -qi "reactor" /tmp/ci.log; then echo "REACTOR: ComfyUI ноду увидел" >> /reactor_status.txt; \
-    else echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; fi; \
+# ── ПРАВДА О СБОРКЕ В ЛОГЕ ───────────────────────────────────────────────────
+# Поднимаем ComfyUI в режиме CI (только загрузка нод, без сервера) и смотрим, зарегистрировалась ли
+# нода. Проверка МЯГКАЯ — билд не валит, но в логе сборки сразу видно, поедет face-swap или нет.
+RUN (cd /comfyui && timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1 || true); \
+    if grep -qi "reactor" /tmp/ci.log; then \
+      echo "REACTOR: ComfyUI ноду увидел" >> /reactor_status.txt; \
+    else \
+      echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; \
+    fi; \
+    grep -iE "reactor|insightface|import failed|traceback" /tmp/ci.log | head -30 || true; \
     echo "─── итог ───"; cat /reactor_status.txt
-
-# ── ПРОВЕРКА АУДИО-НОД (по логу старта из гейта выше) ────────────────────────
-# ПОЧЕМУ ПРЕДУПРЕЖДЕНИЕ, А НЕ ПАДЕНИЕ. Я сделал эту проверку жёсткой — и заблокировал выпуск
-# образов: `--quick-test-for-ci` не обязан печатать имена классов нод, поэтому grep не находил их
-# даже когда ноды в порядке, и падала КАЖДАЯ сборка, включая чужие. Гейт, который валит всё,
-# вреднее отсутствия гейта. Настоящую проверку делаем не здесь, а на живом эндпоинте: посылаем
-# граф с нодой Qwen3Loader и смотрим ответ — missing_node_type значит ноды нет. Это надёжнее
-# грепа по логу и никому не мешает выпускать образы.
-# Цикл по именам нод развёрнут в отдельные grep — по той же причине: без подстановок переменных.
-RUN if [ -f /tmp/ci.log ]; then \
-      grep -iE "qwen3|heartmula|import failed|traceback" /tmp/ci.log | head -30 || true; \
-      (grep -q "Qwen3Loader" /tmp/ci.log && echo "AUDIO: вижу Qwen3Loader") \
-        || echo "?? Qwen3Loader в логе старта не видно — проверьте живым запросом к эндпоинту"; \
-      (grep -q "HeartMuLaLoader" /tmp/ci.log && echo "AUDIO: вижу HeartMuLaLoader") \
-        || echo "?? HeartMuLaLoader в логе старта не видно — проверьте живым запросом к эндпоинту"; \
-    else echo "?? лога старта нет — проверить нечем"; fi
 
 # requests уже есть в базовом образе (использует стоковый handler).
