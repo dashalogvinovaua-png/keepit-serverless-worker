@@ -84,7 +84,7 @@ RUN if python3 -c "import insightface, onnxruntime" >/dev/null 2>&1; then \
       cd /comfyui/custom_nodes \
       && (git clone https://github.com/Gourieff/ComfyUI-ReActor.git \
           || git clone https://codeberg.org/Gourieff/comfyui-reactor.git ComfyUI-ReActor) \
-      && (git -C ComfyUI-ReActor checkout -q 6ad6b35a4df250d14cb2abf0808c9ffedf59f747 \
+      && (git -C ComfyUI-ReActor checkout -q 6ad6b35a4df2 \
           || echo "?? закреплённый коммит ReActor не найден — остаюсь на ветке по умолчанию") \
       && grep -viE '^(numpy|opencv-python)([<>=!].*)?$' ComfyUI-ReActor/requirements.txt > /tmp/reactor-req.txt \
       && (pip install --no-cache-dir -r /tmp/reactor-req.txt || true) \
