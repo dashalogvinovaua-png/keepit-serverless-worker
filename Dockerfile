@@ -105,6 +105,42 @@ RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insi
  (cd models && wget -q -O buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
    && mkdir -p buffalo_l && (cd buffalo_l && unzip -oq ../buffalo_l.zip) && rm -f buffalo_l.zip || true)
 
+# ── ЗВУК: ноды речи и музыки для сервиса audio (platform/services/audio) ─────
+# Речь  — ComfyUI-Qwen3-TTS (Qwen3-TTS 1.7B, Apache 2.0): готовые тембры, голос по описанию, клон.
+# Музыка — ComfyUI-RT-HeartMuLa (HeartMuLa-3B, Apache 2.0): песня с вокалом по тексту и тегам.
+# Веса (~16 ГБ) в образ НЕ кладём — они на сетевом томе, см. dl_audio_models.py.
+#
+# КОММИТЫ ЗАКРЕПЛЕНЫ. `--depth 1` без пиннинга делает сборку невоспроизводимой: сегодня образ
+# собрался, завтра автор ноды сломал импорт — и ферма встала на ровном месте.
+ARG QWEN_TTS_COMMIT=17c22adb80a63c1c51bf74549e71a5cf218f4e1b
+ARG HEARTMULA_COMMIT=64e5419bf4aa6f002ac6178d4d71841429010021
+RUN cd /comfyui/custom_nodes \
+ && git clone https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git \
+ && git -C ComfyUI-Qwen3-TTS checkout --quiet "$QWEN_TTS_COMMIT" \
+ && git clone https://github.com/monnky/ComfyUI-RT-HeartMuLa.git \
+ && git -C ComfyUI-RT-HeartMuLa checkout --quiet "$HEARTMULA_COMMIT" \
+ && echo "AUDIO: ноды склонированы на закреплённых коммитах"
+
+# Версии torch/numpy/transformers ФИКСИРУЕМ перед установкой: в requirements обоих пакетов они
+# записаны без версий, а подмена torch ломает Wan/LTX/SCAIL/ReActor — то есть всю видео- и фото-часть.
+RUN pip freeze 2>/dev/null | grep -iE '^(torch|torchvision|torchaudio|numpy|transformers)==' > /tmp/audio_con.txt; \
+    echo "── зафиксировано перед аудио-нодами ──"; cat /tmp/audio_con.txt
+RUN for d in ComfyUI-Qwen3-TTS ComfyUI-RT-HeartMuLa; do \
+      grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
+        /comfyui/custom_nodes/$d/requirements.txt > /tmp/req.txt; \
+      pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req.txt \
+        || echo "!! requirements $d встали не полностью — гейт старта покажет, жива ли нода"; \
+    done
+# torch обязан остаться прежним: если сдвинулся — образ не выпускаем.
+RUN python3 -c "\
+import torch, re;\
+want=[l.split('==')[1].strip() for l in open('/tmp/audio_con.txt') if l.lower().startswith('torch==')];\
+assert not want or torch.__version__==want[0], 'torch сдвинулся: %s -> %s' % (want[0], torch.__version__);\
+print('torch не тронут:', torch.__version__)"
+
+# Папки, куда ноды смотрят за весами на томе (extra_model_paths.yaml уже указывает на том).
+RUN mkdir -p /comfyui/models/Qwen3-TTS /comfyui/models/HeartMuLa
+
 # ── ГЛАВНЫЙ ГЕЙТ: COMFYUI ОБЯЗАН СТАРТОВАТЬ ─────────────────────────────────
 # ЭТА ПРОВЕРКА ДОЛЖНА ОСТАВАТЬСЯ ПОСЛЕДНЕЙ В ФАЙЛЕ. Всё, что добавляется ниже, ею не проверено.
 #
@@ -127,5 +163,23 @@ RUN cd /comfyui && (timeout 1500 python main.py --quick-test-for-ci --cpu > /tmp
     if grep -qi "reactor" /tmp/ci.log; then echo "REACTOR: ComfyUI ноду увидел" >> /reactor_status.txt; \
     else echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; fi; \
     echo "─── итог ───"; cat /reactor_status.txt
+
+# ── ПРОВЕРКА АУДИО-НОД (по логу старта из гейта выше) ────────────────────────
+# Гейт выше проверяет, что ComfyUI ВООБЩЕ стартует. Здесь проверяем, что он увидел ИМЕННО те ноды,
+# без которых сервис audio не работает. Жёстко: молча выпускать образ без них нельзя — сервис
+# уйдёт в облако и будет тратить деньги там, а причина останется невидимой.
+RUN set -e; \
+    if [ ! -f /tmp/ci.log ]; then echo "!! нет лога старта — проверять нечего"; exit 1; fi; \
+    grep -iE "qwen3|heartmula|import failed|traceback" /tmp/ci.log | head -30 || true; \
+    MISSING=""; \
+    for n in Qwen3Loader Qwen3CustomVoice Qwen3VoiceDesign Qwen3VoiceClone HeartMuLaLoader HeartMuLaGenerator SaveAudio; do \
+      grep -q "$n" /tmp/ci.log || MISSING="$MISSING $n"; \
+    done; \
+    if [ -n "$MISSING" ]; then \
+      echo "!! АУДИО-НОДЫ НЕ ЗАГРУЗИЛИСЬ:$MISSING — образ не выпускаем"; \
+      grep -iE -A6 "import failed|traceback" /tmp/ci.log | head -60 || true; \
+      exit 1; \
+    fi; \
+    echo "AUDIO: ComfyUI увидел все ноды речи и музыки"
 
 # requests уже есть в базовом образе (использует стоковый handler).

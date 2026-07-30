@@ -750,10 +750,12 @@ def handler(job):
 
         print(f"worker-comfyui - Processing {len(outputs)} output nodes...")
         for node_id, node_output in outputs.items():
-            # ПАТЧ KeepIt: видео/gif-выходы (SaveVideo/VHS) тоже отдаём — кладём их в 'images',
-            # который стоковый код уже умеет тянуть через /view и кодировать (работает для mp4).
+            # ПАТЧ KeepIt: видео/gif/АУДИО-выходы (SaveVideo/VHS/SaveAudio) тоже отдаём — кладём их
+            # в 'images', который стоковый код уже умеет тянуть через /view и кодировать
+            # (работает и для mp4, и для flac/mp3: /view отдаёт любой файл из output-папки).
+            # Без 'audio' сервис звука получал бы «no output images» на каждом графе SaveAudio.
             _media = list(node_output.get('images', []) or [])
-            for _mk in ('videos', 'gifs'):
+            for _mk in ('videos', 'gifs', 'audio'):
                 _media += list(node_output.get(_mk, []) or [])
             if _media:
                 node_output = dict(node_output)
