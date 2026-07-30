@@ -3,6 +3,11 @@
 # модели с сетевого тома (/runpod-volume/models). Мы лишь заменяем handler.py.
 FROM runpod/worker-comfyui:5.8.6-base
 
+# Версия ноды ReActor ЗАФИКСИРОВАНА коммитом. С --depth 1 без пиннинга один и тот же Dockerfile
+# каждый раз собирал разный код ноды: сборка невоспроизводима, а поломка может прийти сама
+# при следующем ребилде. Обновлять эту строку — осознанное действие, а не побочный эффект.
+ARG REACTOR_SHA=6ad6b35a4df250d14cb2abf0808c9ffedf59f747
+
 # Наш handler умеет собирать ЛЮБОЙ выходной файл (SaveVideo → mp4), а не только images.
 COPY handler.py /handler.py
 
@@ -82,7 +87,8 @@ RUN if ! python3 -c "import insightface" >/dev/null 2>&1; then \
 # а opencv-python конфликтует с уже стоящим opencv-python-headless.
 RUN if python3 -c "import insightface, onnxruntime" >/dev/null 2>&1; then \
       cd /comfyui/custom_nodes \
-      && (git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
+      && (git clone https://github.com/Gourieff/ComfyUI-ReActor.git \
+          && git -C ComfyUI-ReActor checkout -q ${REACTOR_SHA} \
           || git clone --depth 1 https://codeberg.org/Gourieff/comfyui-reactor.git ComfyUI-ReActor) \
       && grep -viE '^(numpy|opencv-python)([<>=!].*)?$' ComfyUI-ReActor/requirements.txt > /tmp/reactor-req.txt \
       && (pip install --no-cache-dir -r /tmp/reactor-req.txt || true) \
@@ -99,16 +105,21 @@ RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insi
  (cd models && wget -q -O buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
    && mkdir -p buffalo_l && (cd buffalo_l && unzip -oq ../buffalo_l.zip) && rm -f buffalo_l.zip || true)
 
-# ── ПРАВДА О СБОРКЕ В ЛОГЕ ───────────────────────────────────────────────────
-# Поднимаем ComfyUI в режиме CI (только загрузка нод, без сервера) и смотрим, зарегистрировалась ли
-# нода. Проверка МЯГКАЯ — билд не валит, но в логе сборки сразу видно, поедет face-swap или нет.
-RUN (cd /comfyui && timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1 || true); \
-    if grep -qi "reactor" /tmp/ci.log; then \
-      echo "REACTOR: ComfyUI ноду увидел" >> /reactor_status.txt; \
-    else \
-      echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; \
+# ── ГЛАВНЫЙ ГЕЙТ: COMFYUI ОБЯЗАН СТАРТОВАТЬ ─────────────────────────────────
+# ЭТА ПРОВЕРКА ДОЛЖНА ОСТАВАТЬСЯ ПОСЛЕДНЕЙ В ФАЙЛЕ. Всё, что добавляется ниже, ею не проверено.
+#
+# Зачем жёстко. Битая кастом-нода роняет ComfyUI на старте, но контейнер при этом поднимается,
+# RunPod считает воркер живым — и задачи просто копятся в очереди. Ферма молчит, а причина не видна
+# ни в одном ответе API. Мягкая проверка такую сборку пропускала: она лишь писала строчку в лог.
+# Теперь сборка ПАДАЕТ. RunPod при неудачной сборке оставляет предыдущий рабочий образ,
+# то есть худший исход — «нового не приехало», а не «ферма встала».
+RUN cd /comfyui && (timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1; echo $? > /tmp/ci.rc); \
+    grep -iE "reactor|insightface|import failed|traceback|error" /tmp/ci.log | head -40 || true; \
+    if [ "$(cat /tmp/ci.rc)" != "0" ]; then \
+      echo "!! COMFYUI НЕ СТАРТУЕТ — образ не выпускаем. Последние строки лога:"; tail -40 /tmp/ci.log; exit 1; \
     fi; \
-    grep -iE "reactor|insightface|import failed|traceback" /tmp/ci.log | head -30 || true; \
+    if grep -qi "reactor" /tmp/ci.log; then echo "REACTOR: ComfyUI ноду увидел" >> /reactor_status.txt; \
+    else echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; fi; \
     echo "─── итог ───"; cat /reactor_status.txt
 
 # requests уже есть в базовом образе (использует стоковый handler).
