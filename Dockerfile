@@ -100,6 +100,44 @@ RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insi
  (cd models && wget -q -O buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
    && mkdir -p buffalo_l && (cd buffalo_l && unzip -oq ../buffalo_l.zip) && rm -f buffalo_l.zip || true)
 
+# ── ЗВУК: ноды речи и музыки для сервиса audio (platform/services/audio) ─────
+# Речь  — ComfyUI-Qwen3-TTS (Qwen3-TTS 1.7B, Apache 2.0): готовые тембры, голос по описанию, клон.
+# Музыка — ComfyUI-RT-HeartMuLa (HeartMuLa-3B, Apache 2.0): песня с вокалом по тексту и тегам.
+# Веса (~16 ГБ) в образ НЕ кладём — они на сетевом томе, см. dl_audio_models.py.
+#
+# КОММИТЫ ЗАКРЕПЛЕНЫ, но формой, которую принимает сборщик RunPod: поверхностный клон плюс
+# дозагрузка нужного коммита. Полный `git clone` (без --depth 1) валидатор отвергает целиком —
+# именно на нём стояли все сборки 30 июля, см. шапку файла. Если коммит вдруг не дозагрузится,
+# остаёмся на ветке по умолчанию: лучше свежая нода, чем несобранный образ.
+RUN cd /comfyui/custom_nodes \
+ && git clone --depth 1 https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git \
+ && (cd ComfyUI-Qwen3-TTS && git fetch -q --depth 1 origin 17c22adb80a6 && git checkout -q FETCH_HEAD \
+     || echo "?? закреплённый коммит Qwen3-TTS не дозагрузился — остаюсь на ветке по умолчанию") \
+ && cd /comfyui/custom_nodes \
+ && git clone --depth 1 https://github.com/monnky/ComfyUI-RT-HeartMuLa.git \
+ && (cd ComfyUI-RT-HeartMuLa && git fetch -q --depth 1 origin 64e5419bf4aa && git checkout -q FETCH_HEAD \
+     || echo "?? закреплённый коммит HeartMuLa не дозагрузился — остаюсь на ветке по умолчанию") \
+ && echo "AUDIO: ноды склонированы"
+
+# Версии torch/numpy/transformers ФИКСИРУЕМ перед установкой: в requirements обоих пакетов они
+# записаны без версий, а подмена torch ломает Wan/LTX/SCAIL/ReActor — то есть всю видео- и фото-часть.
+RUN pip freeze 2>/dev/null | grep -iE '^(torch|torchvision|torchaudio|numpy|transformers)==' > /tmp/audio_con.txt; \
+    echo "── зафиксировано перед аудио-нодами ──"; cat /tmp/audio_con.txt
+# Цикл по нодам развёрнут в две команды: подстановок переменных в файле не держим.
+RUN grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
+      /comfyui/custom_nodes/ComfyUI-Qwen3-TTS/requirements.txt > /tmp/req-tts.txt; \
+    pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req-tts.txt \
+      || echo "!! requirements Qwen3-TTS встали не полностью — проверка старта покажет, жива ли нода"
+RUN grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
+      /comfyui/custom_nodes/ComfyUI-RT-HeartMuLa/requirements.txt > /tmp/req-mula.txt; \
+    pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req-mula.txt \
+      || echo "!! requirements HeartMuLa встали не полностью — проверка старта покажет, жива ли нода"
+# torch обязан остаться прежним: если сдвинулся — образ не выпускаем.
+RUN python3 -c "import torch; want=[l.split('==')[1].strip() for l in open('/tmp/audio_con.txt') if l.lower().startswith('torch==')]; assert not want or torch.__version__==want[0], 'torch сдвинулся: %s -> %s' % (want[0], torch.__version__); print('torch не тронут:', torch.__version__)"
+
+# Папки, куда ноды смотрят за весами на томе (extra_model_paths.yaml уже указывает на том).
+RUN mkdir -p /comfyui/models/Qwen3-TTS /comfyui/models/HeartMuLa
+
 # ── ПРАВДА О СБОРКЕ В ЛОГЕ ───────────────────────────────────────────────────
 # Поднимаем ComfyUI в режиме CI (только загрузка нод, без сервера) и смотрим, зарегистрировалась ли
 # нода. Проверка МЯГКАЯ — билд не валит, но в логе сборки сразу видно, поедет face-swap или нет.
@@ -111,5 +149,17 @@ RUN (cd /comfyui && timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/
     fi; \
     grep -iE "reactor|insightface|import failed|traceback" /tmp/ci.log | head -30 || true; \
     echo "─── итог ───"; cat /reactor_status.txt
+
+# ── ПРОВЕРКА АУДИО-НОД по логу старта выше ──────────────────────────────────
+# Только предупреждение: `--quick-test-for-ci` не обязан печатать имена классов нод, поэтому
+# отсутствие строки — не доказательство поломки. Надёжная проверка делается живым запросом к
+# эндпоинту графом с нодой Qwen3Loader: ответ missing_node_type означает, что ноды нет.
+RUN if [ -f /tmp/ci.log ]; then \
+      grep -iE "qwen3|heartmula|import failed|traceback" /tmp/ci.log | head -30 || true; \
+      (grep -q "Qwen3Loader" /tmp/ci.log && echo "AUDIO: вижу Qwen3Loader") \
+        || echo "?? Qwen3Loader в логе старта не видно — проверьте живым запросом к эндпоинту"; \
+      (grep -q "HeartMuLaLoader" /tmp/ci.log && echo "AUDIO: вижу HeartMuLaLoader") \
+        || echo "?? HeartMuLaLoader в логе старта не видно — проверьте живым запросом к эндпоинту"; \
+    else echo "?? лога старта нет — проверить нечем"; fi
 
 # requests уже есть в базовом образе (использует стоковый handler).
