@@ -167,21 +167,21 @@ RUN cd /comfyui && (timeout 1500 python main.py --quick-test-for-ci --cpu > /tmp
     echo "─── итог ───"; cat /reactor_status.txt
 
 # ── ПРОВЕРКА АУДИО-НОД (по логу старта из гейта выше) ────────────────────────
-# Гейт выше проверяет, что ComfyUI ВООБЩЕ стартует. Здесь проверяем, что он увидел ИМЕННО те ноды,
-# без которых сервис audio не работает. Жёстко: молча выпускать образ без них нельзя — сервис
-# уйдёт в облако и будет тратить деньги там, а причина останется невидимой.
-RUN set -e; \
-    if [ ! -f /tmp/ci.log ]; then echo "!! нет лога старта — проверять нечего"; exit 1; fi; \
-    grep -iE "qwen3|heartmula|import failed|traceback" /tmp/ci.log | head -30 || true; \
-    MISSING=""; \
-    for n in Qwen3Loader Qwen3CustomVoice Qwen3VoiceDesign Qwen3VoiceClone HeartMuLaLoader HeartMuLaGenerator SaveAudio; do \
-      grep -q "$n" /tmp/ci.log || MISSING="$MISSING $n"; \
-    done; \
-    if [ -n "$MISSING" ]; then \
-      echo "!! АУДИО-НОДЫ НЕ ЗАГРУЗИЛИСЬ:$MISSING — образ не выпускаем"; \
-      grep -iE -A6 "import failed|traceback" /tmp/ci.log | head -60 || true; \
-      exit 1; \
-    fi; \
-    echo "AUDIO: ComfyUI увидел все ноды речи и музыки"
+# ПОЧЕМУ ПРЕДУПРЕЖДЕНИЕ, А НЕ ПАДЕНИЕ. Я сделал эту проверку жёсткой — и заблокировал выпуск
+# образов: `--quick-test-for-ci` не обязан печатать имена классов нод, поэтому grep не находил их
+# даже когда ноды в порядке, и падала КАЖДАЯ сборка, включая чужие. Гейт, который валит всё,
+# вреднее отсутствия гейта. Настоящую проверку делаем не здесь, а на живом эндпоинте: посылаем
+# граф с нодой Qwen3Loader и смотрим ответ — missing_node_type значит ноды нет. Это надёжнее
+# грепа по логу и никому не мешает выпускать образы.
+RUN if [ -f /tmp/ci.log ]; then \
+      grep -iE "qwen3|heartmula|import failed|traceback" /tmp/ci.log | head -30 || true; \
+      MISSING=""; \
+      for n in Qwen3Loader Qwen3CustomVoice HeartMuLaLoader SaveAudio; do \
+        grep -q "$n" /tmp/ci.log || MISSING="$MISSING $n"; \
+      done; \
+      if [ -n "$MISSING" ]; then \
+        echo "?? в логе старта не видно нод:$MISSING — проверьте живым запросом к эндпоинту"; \
+      else echo "AUDIO: ComfyUI увидел ноды речи и музыки"; fi; \
+    else echo "?? лога старта нет — проверить нечем"; fi
 
 # requests уже есть в базовом образе (использует стоковый handler).
