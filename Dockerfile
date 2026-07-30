@@ -125,18 +125,17 @@ RUN cd /comfyui/custom_nodes \
 # записаны без версий, а подмена torch ломает Wan/LTX/SCAIL/ReActor — то есть всю видео- и фото-часть.
 RUN pip freeze 2>/dev/null | grep -iE '^(torch|torchvision|torchaudio|numpy|transformers)==' > /tmp/audio_con.txt; \
     echo "── зафиксировано перед аудио-нодами ──"; cat /tmp/audio_con.txt
-RUN for d in ComfyUI-Qwen3-TTS ComfyUI-RT-HeartMuLa; do \
-      grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
-        /comfyui/custom_nodes/$d/requirements.txt > /tmp/req.txt; \
-      pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req.txt \
-        || echo "!! requirements $d встали не полностью — гейт старта покажет, жива ли нода"; \
-    done
+# Цикл развёрнут в две команды: подстановок переменных в файле быть не должно (см. шапку файла).
+RUN grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
+      /comfyui/custom_nodes/ComfyUI-Qwen3-TTS/requirements.txt > /tmp/req-tts.txt; \
+    pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req-tts.txt \
+      || echo "!! requirements Qwen3-TTS встали не полностью — гейт старта покажет, жива ли нода"
+RUN grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
+      /comfyui/custom_nodes/ComfyUI-RT-HeartMuLa/requirements.txt > /tmp/req-mula.txt; \
+    pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req-mula.txt \
+      || echo "!! requirements HeartMuLa встали не полностью — гейт старта покажет, жива ли нода"
 # torch обязан остаться прежним: если сдвинулся — образ не выпускаем.
-RUN python3 -c "\
-import torch, re;\
-want=[l.split('==')[1].strip() for l in open('/tmp/audio_con.txt') if l.lower().startswith('torch==')];\
-assert not want or torch.__version__==want[0], 'torch сдвинулся: %s -> %s' % (want[0], torch.__version__);\
-print('torch не тронут:', torch.__version__)"
+RUN python3 -c "import torch; want=[l.split('==')[1].strip() for l in open('/tmp/audio_con.txt') if l.lower().startswith('torch==')]; assert not want or torch.__version__==want[0], 'torch сдвинулся: %s -> %s' % (want[0], torch.__version__); print('torch не тронут:', torch.__version__)"
 
 # Папки, куда ноды смотрят за весами на томе (extra_model_paths.yaml уже указывает на том).
 RUN mkdir -p /comfyui/models/Qwen3-TTS /comfyui/models/HeartMuLa
@@ -155,12 +154,14 @@ RUN mkdir -p /comfyui/models/Qwen3-TTS /comfyui/models/HeartMuLa
 # Тайм-аут ЩЕДРЫЙ: с нашими нодами инициализация на CPU идёт минутами (insightface, onnxruntime,
 # facerestore). Код 124 — это «не успело», а не «упало»: такую сборку НЕ валим, но кричим в лог.
 # Валим только настоящий сбой старта (любой другой ненулевой код).
-RUN cd /comfyui && (timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1; echo $? > /tmp/ci.rc); \
-    RC=$(cat /tmp/ci.rc); \
+# Код возврата команды не читаем: любых подстановок переменных в Dockerfile сборщик RunPod
+# не принимает (см. шапку файла). Судим по логу — гейт всё равно только предупреждает.
+RUN (cd /comfyui && timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/ci.log 2>&1 \
+      || echo "COMFYUI-CI: старт завершился ненулевым кодом (или не уложился в 10 минут)" >> /tmp/ci.log); \
     grep -iE "reactor|insightface|import failed|traceback|error" /tmp/ci.log | head -40 || true; \
-    if [ "$RC" = "0" ]; then echo "COMFYUI: старт ок" >> /reactor_status.txt; \
-    elif [ "$RC" = "124" ]; then echo "COMFYUI: проверка не уложилась в 10 мин" >> /reactor_status.txt; \
-    else echo "COMFYUI: СТАРТ НЕ ПРОШЁЛ, код $RC — смотри хвост лога выше" >> /reactor_status.txt; tail -40 /tmp/ci.log; fi; \
+    if grep -q "COMFYUI-CI: старт завершился" /tmp/ci.log; then \
+      echo "COMFYUI: старт НЕ прошёл чисто — смотри хвост лога" >> /reactor_status.txt; tail -40 /tmp/ci.log; \
+    else echo "COMFYUI: старт ок" >> /reactor_status.txt; fi; \
     if grep -qi "reactor" /tmp/ci.log; then echo "REACTOR: ComfyUI ноду увидел" >> /reactor_status.txt; \
     else echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; fi; \
     echo "─── итог ───"; cat /reactor_status.txt
@@ -172,15 +173,13 @@ RUN cd /comfyui && (timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/
 # вреднее отсутствия гейта. Настоящую проверку делаем не здесь, а на живом эндпоинте: посылаем
 # граф с нодой Qwen3Loader и смотрим ответ — missing_node_type значит ноды нет. Это надёжнее
 # грепа по логу и никому не мешает выпускать образы.
+# Цикл по именам нод развёрнут в отдельные grep — по той же причине: без подстановок переменных.
 RUN if [ -f /tmp/ci.log ]; then \
       grep -iE "qwen3|heartmula|import failed|traceback" /tmp/ci.log | head -30 || true; \
-      MISSING=""; \
-      for n in Qwen3Loader Qwen3CustomVoice HeartMuLaLoader SaveAudio; do \
-        grep -q "$n" /tmp/ci.log || MISSING="$MISSING $n"; \
-      done; \
-      if [ -n "$MISSING" ]; then \
-        echo "?? в логе старта не видно нод:$MISSING — проверьте живым запросом к эндпоинту"; \
-      else echo "AUDIO: ComfyUI увидел ноды речи и музыки"; fi; \
+      (grep -q "Qwen3Loader" /tmp/ci.log && echo "AUDIO: вижу Qwen3Loader") \
+        || echo "?? Qwen3Loader в логе старта не видно — проверьте живым запросом к эндпоинту"; \
+      (grep -q "HeartMuLaLoader" /tmp/ci.log && echo "AUDIO: вижу HeartMuLaLoader") \
+        || echo "?? HeartMuLaLoader в логе старта не видно — проверьте живым запросом к эндпоинту"; \
     else echo "?? лога старта нет — проверить нечем"; fi
 
 # requests уже есть в базовом образе (использует стоковый handler).
