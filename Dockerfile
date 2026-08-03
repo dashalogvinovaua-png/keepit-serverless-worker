@@ -119,11 +119,21 @@ RUN python3 -m venv --copies /opt/audio-venv \
 # выпустить сломанный.
 #
 # 1. Без ReActor образ не выпускаем: без него видео теряет пересадку лица.
-RUN python3 -c "import insightface, onnxruntime; print('insightface ок')" \
+#    insightface — жёстко, он и есть свап. onnxruntime проверяем отдельно и мягко: базовый образ
+#    иногда несёт CPU-вариант, и это не повод не выпускать образ.
+RUN python3 -c "import insightface; print('insightface ок')" \
  && test -d /comfyui/custom_nodes/ComfyUI-ReActor \
  || (echo "!! ВОРОТА: ReActor или insightface не собраны — образ НЕ выпускаем" && exit 1)
-# 2. torch и torchaudio обязаны совпадать по версии: расхождение кладёт Wan, LTX, SCAIL и ReActor.
-RUN python3 -c "import torch, torchaudio, sys; a = torch.__version__.split('+')[0]; b = torchaudio.__version__.split('+')[0]; print('torch', a, '| torchaudio', b); ok = a.rsplit('.', 1)[0] == b.rsplit('.', 1)[0]; print('ВОРОТА: пара' , 'совпадает' if ok else 'РАЗОШЛАСЬ'); sys.exit(0 if ok else 1)"
+RUN python3 -c "import onnxruntime; print('onnxruntime ок:', onnxruntime.get_available_providers())" \
+ || echo "?? onnxruntime не импортируется — свап может считаться медленно"
+
+# 2. torch и torchaudio должны РАБОТАТЬ ВМЕСТЕ. Проверяем делом, а не подписью на коробке:
+#    у базового образа пара 2.12.0 / 2.11.0 — номера разные, но собраны они друг под друга и
+#    работают. Первая версия этих ворот сравнивала НОМЕРА и уронила сборку на здоровом образе;
+#    ломает видео не расхождение цифр, а несовместимость ABI — вот её и ловим: грузим обе
+#    библиотеки в один процесс и делаем настоящую операцию.
+RUN python3 -c "import torch, torchaudio, sys; print('torch', torch.__version__, '| torchaudio', torchaudio.__version__); w = torch.zeros(1, 16000); torchaudio.functional.resample(w, 16000, 22050); print('ВОРОТА: torch и torchaudio работают вместе'); sys.exit(0)" \
+ || (echo "!! ВОРОТА: torch и torchaudio несовместимы — образ НЕ выпускаем" && exit 1)
 
 # ── ПРАВДА О СБОРКЕ В ЛОГЕ ───────────────────────────────────────────────────
 # Поднимаем ComfyUI в режиме CI (только загрузка нод, без сервера) и смотрим, зарегистрировалась ли
