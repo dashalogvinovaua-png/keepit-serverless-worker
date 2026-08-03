@@ -25,6 +25,10 @@ import time
 # Но том общий с видео и фото, и он бывает полон — тогда вместо весов приезжает «Disk quota
 # exceeded». В этом случае уходим на диск контейнера: веса будут качаться при каждом холодном
 # старте (дороже по времени), зато движок работает, а не отказывает целиком.
+# ВЕСА ЛЕЖАТ В ОБРАЗЕ. На томе и на диске контейнера запись упирается в квоту («Disk quota
+# exceeded» при 91 тысяче свободных гигабайт), поэтому качать в работе нельзя вовсе — веса
+# приезжают вместе с образом, собранные заранее.
+IMAGE_CACHE = "/opt/audio-models"
 VOLUME_CACHE = "/runpod-volume/hf-cache"
 LOCAL_CACHE = "/root/.cache/huggingface"
 
@@ -40,7 +44,10 @@ def _volume_has_room(need_gb=6):
 
 
 _room, _free = _volume_has_room()
-os.environ.setdefault("HF_HOME", VOLUME_CACHE if _room else LOCAL_CACHE)
+# Порядок: веса из образа → том → диск контейнера. Первый вариант единственный надёжный.
+os.environ.setdefault("HF_HOME", IMAGE_CACHE if os.path.isdir(IMAGE_CACHE)
+                      else (VOLUME_CACHE if _room else LOCAL_CACHE))
+os.environ.setdefault("HF_HUB_OFFLINE", "1" if os.path.isdir(IMAGE_CACHE) else "0")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")   # xet рвётся на сетевом томе, проверено на весах
 
 _cache = {}
