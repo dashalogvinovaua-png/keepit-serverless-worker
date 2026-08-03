@@ -140,11 +140,24 @@ def run_ttsuk(job):
             continue
     from tts_uk.inference import synthesis
     voice = job.get("voice") or "tetiana"          # tetiana, lada — женские; mykyta — мужской
+    # Полная подпись: модель принимает не только текст и голос, но и рычаги просодии — темп,
+    # высоту, громкость и разброс. Значения по умолчанию взяты нейтральными: 1.0 для темпа,
+    # ноль для сдвигов высоты и энергии, обычные сигмы RAD-TTS++. Их можно править снаружи —
+    # именно ими и будет отличаться манера у блогеров, которым достался один голос.
     _mels, wave, stats = synthesis(
         text=job["text"],
         voice=voice,
         n_takes=int(job.get("takes", 1)),
         use_latest_take=False,
+        token_dur_scaling=float(job.get("speed_scale", 1.0)),
+        f0_mean=float(job.get("f0_mean", 0.0)),
+        f0_std=float(job.get("f0_std", 0.0)),
+        energy_mean=float(job.get("energy_mean", 0.0)),
+        energy_std=float(job.get("energy_std", 0.0)),
+        sigma_decoder=float(job.get("sigma", 0.8)),
+        sigma_token_duration=float(job.get("sigma_dur", 0.666)),
+        sigma_f0=float(job.get("sigma_f0", 1.0)),
+        sigma_energy=float(job.get("sigma_energy", 1.0)),
     )
     _cache["ttsuk_stats"] = stats
     return wave, 44100
