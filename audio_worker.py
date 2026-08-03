@@ -33,21 +33,44 @@ VOLUME_CACHE = "/runpod-volume/hf-cache"
 LOCAL_CACHE = "/root/.cache/huggingface"
 
 
-def _volume_has_room(need_gb=6):
-    """Хватит ли места на томе. Спрашиваем систему, а не надеемся."""
+def _writable(path, need_gb=3):
+    """МОЖНО ЛИ ТУДА ПИСАТЬ — проверяем делом, а не свободным местом.
+
+    Ошибка, на которой мы потеряли два часа: система показывает на томе 92 тысячи гигабайт
+    свободных, а запись отвечает «Disk quota exceeded». Свободное место и право писать — разные
+    вещи, поэтому спрашиваем не «сколько осталось», а «получится ли»: создаём и удаляем файл.
+    """
     import shutil
     try:
-        free = shutil.disk_usage("/runpod-volume").free / 1e9
-        return free >= need_gb, round(free, 1)
+        free = shutil.disk_usage(path).free / 1e9
     except Exception:  # noqa: BLE001
         return False, None
+    if free < need_gb:
+        return False, round(free, 1)
+    probe = os.path.join(path, ".write-probe")
+    try:
+        os.makedirs(path, exist_ok=True)
+        with open(probe, "wb") as f:
+            f.write(b"x" * 1024)
+        os.remove(probe)
+        return True, round(free, 1)
+    except Exception:  # noqa: BLE001
+        return False, round(free, 1)
 
 
-_room, _free = _volume_has_room()
-# Порядок: веса из образа → том → диск контейнера. Первый вариант единственный надёжный.
-os.environ.setdefault("HF_HOME", IMAGE_CACHE if os.path.isdir(IMAGE_CACHE)
-                      else (VOLUME_CACHE if _room else LOCAL_CACHE))
-os.environ.setdefault("HF_HUB_OFFLINE", "1" if os.path.isdir(IMAGE_CACHE) else "0")
+# Порядок: веса из образа → том, если туда РЕАЛЬНО пишется → диск контейнера.
+_vol_ok, _free = _writable(VOLUME_CACHE)
+_local_ok, _local_free = _writable(LOCAL_CACHE)
+if os.path.isdir(IMAGE_CACHE) and os.listdir(IMAGE_CACHE):
+    _where = IMAGE_CACHE
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")     # веса в образе, в сеть ходить незачем
+elif _vol_ok:
+    _where = VOLUME_CACHE
+elif _local_ok:
+    _where = LOCAL_CACHE
+else:
+    _where = LOCAL_CACHE                              # писать некуда — отказ объяснит сам движок
+os.environ.setdefault("HF_HOME", _where)
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")   # xet рвётся на сетевом томе, проверено на весах
 
 _cache = {}
@@ -129,7 +152,9 @@ def main():
         data = _wav_bytes(wave, sr)
         print(json.dumps({
             "ok": True, "engine": engine, "sample_rate": sr,
-            "weights_at": os.environ.get("HF_HOME"), "volume_free_gb": _free,
+            "weights_at": os.environ.get("HF_HOME"),
+            "volume_free_gb": _free, "volume_writable": _vol_ok,
+            "container_free_gb": _local_free, "container_writable": _local_ok,
             "seconds": round(len(data) / (sr * 2), 2),
             "took": round(time.time() - started, 1),
             "audio": base64.b64encode(data).decode(),
@@ -138,8 +163,11 @@ def main():
         import traceback
         msg = str(e)
         if "quota" in msg.lower() or "no space" in msg.lower():
-            msg = ("места под веса не осталось: на сетевом томе свободно %s ГБ, диск контейнера "
-                   "тоже полон. Нужно освободить том — это общая площадь с видео и фото." % _free)
+            msg = ("веса некуда положить: том %s (свободно %s ГБ), диск контейнера %s "
+                   "(свободно %s ГБ). Свободное место есть, но запись запрещена квотой — "
+                   "веса должны приезжать внутри образа." % (
+                       "пишется" if _vol_ok else "НЕ пишется", _free,
+                       "пишется" if _local_ok else "НЕ пишется", _local_free))
         print(json.dumps({"ok": False, "engine": engine,
                           "error": msg[:400],
                           "trace": traceback.format_exc().strip().splitlines()[-4:]}))
