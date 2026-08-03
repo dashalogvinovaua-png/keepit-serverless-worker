@@ -5,6 +5,7 @@ import urllib.request
 import urllib.parse
 import time
 import os
+import sys
 import requests
 import base64
 from io import BytesIO
@@ -569,6 +570,60 @@ def get_image_data(filename, subfolder, image_type):
         return None
 
 
+def diagnose_nodes(want_classes):
+    """Что ComfyUI реально загрузил и на чём споткнулся. Ни генерации, ни GPU."""
+    import importlib.util
+    import traceback
+
+    out = {"custom_nodes": [], "registered": {}, "import_errors": {}, "pip": {}}
+    root = "/comfyui/custom_nodes"
+    try:
+        out["custom_nodes"] = sorted(os.listdir(root))
+    except Exception as e:  # noqa: BLE001
+        out["custom_nodes"] = ["!! %s" % e]
+
+    # Какие классы ComfyUI зарегистрировал (это и есть «нода видна или нет»).
+    try:
+        r = requests.get("http://%s/object_info" % COMFY_HOST, timeout=30)
+        info = r.json() if r.ok else {}
+        out["registered_total"] = len(info)
+        for cls in (want_classes or ["Qwen3Loader", "Qwen3CustomVoice", "Qwen3VoiceDesign",
+                                     "HeartMuLaLoader", "HeartMuLaGenerator"]):
+            out["registered"][cls] = cls in info
+    except Exception as e:  # noqa: BLE001
+        out["registered"] = {"!! object_info": str(e)}
+
+    # ГЛАВНОЕ: пробуем импортировать каждую подозрительную ноду и ловим настоящую ошибку.
+    for name in out["custom_nodes"]:
+        if not any(k in name.lower() for k in ("qwen", "heartmula", "mula")):
+            continue
+        init = os.path.join(root, name, "__init__.py")
+        if not os.path.exists(init):
+            out["import_errors"][name] = "нет __init__.py"
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("diag_%s" % name.replace("-", "_"), init)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod
+            spec.loader.exec_module(mod)
+            out["import_errors"][name] = "ок, импортируется"
+        except Exception:  # noqa: BLE001
+            out["import_errors"][name] = traceback.format_exc().strip().splitlines()[-6:]
+
+    # Версии ключевых пакетов — по ним видно, сдвинулся ли torch и встали ли зависимости нод.
+    try:
+        import importlib.metadata as md
+        for pkg in ("torch", "torchaudio", "transformers", "numpy", "qwen-tts", "modelscope",
+                    "torchtune", "torchao", "vector_quantize_pytorch", "librosa", "soundfile"):
+            try:
+                out["pip"][pkg] = md.version(pkg)
+            except Exception:  # noqa: BLE001
+                out["pip"][pkg] = None
+    except Exception as e:  # noqa: BLE001
+        out["pip"] = {"!!": str(e)}
+    return out
+
+
 def handler(job):
     """
     Handles a job using ComfyUI via websockets for status and image retrieval.
@@ -587,6 +642,17 @@ def handler(job):
 
     job_input = job["input"]
     job_id = job["id"]
+
+    # ---------------------------------------------------------------------------
+    # ДИАГНОСТИКА НОД (input: {"diagnose": true}) — без генерации и без GPU.
+    #
+    # Зачем. Ноды звука (Qwen3-TTS, HeartMuLa) кладутся в образ, сборка проходит зелёной, а
+    # ComfyUI их не регистрирует: на запрос графа приходит «Node not found». Причина почти всегда
+    # одна — падает ИМПОРТ ноды из-за недостающей библиотеки, и это видно только в логе старта
+    # ComfyUI, до которого снаружи не добраться. Эта ветка отдаёт то же самое ответом на джоб:
+    # что лежит в custom_nodes, какие классы зарегистрированы и КАКАЯ БИБЛИОТЕКА не нашлась.
+    if isinstance(job_input, dict) and job_input.get("diagnose"):
+        return diagnose_nodes(job_input.get("classes") or [])
 
     # Make sure that the input is valid
     validated_data, error_message = validate_input(job_input)
