@@ -21,6 +21,14 @@ import os
 import sys
 import time
 
+# ЗАПАСНОЙ ПУТЬ ПО ЖЕЛЕЗУ. Отдельный torch в нашем окружении оказался собран без ядер под эту
+# карту: «CUDA error: no kernel image is available for execution on the device». Пересобирать
+# стек под каждую модель карты — долго и ненадёжно, поэтому handler при такой ошибке зовёт нас
+# второй раз с FORCE_CPU=1. На процессоре речь считается медленнее, но считается, и владелица
+# слышит звук сегодня, а не после ещё одной пересборки.
+if os.environ.get("FORCE_CPU") == "1":
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 # ГДЕ ЛЕЖАТ ВЕСА. Сначала сетевой том: он переживает холодный старт, и качать надо один раз.
 # Но том общий с видео и фото, и он бывает полон — тогда вместо весов приезжает «Disk quota
 # exceeded». В этом случае уходим на диск контейнера: веса будут качаться при каждом холодном
@@ -94,7 +102,9 @@ def run_chatterbox(job):
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
     model = _cache.get("chatterbox")
     if model is None:
-        model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
+        import torch
+        dev = "cuda" if (os.environ.get("FORCE_CPU") != "1" and torch.cuda.is_available()) else "cpu"
+        model = ChatterboxMultilingualTTS.from_pretrained(device=dev)
         _cache["chatterbox"] = model
     ref = None
     if job.get("ref_audio"):
@@ -164,6 +174,7 @@ def main():
         data = _wav_bytes(wave, sr)
         print(json.dumps({
             "ok": True, "engine": engine, "sample_rate": sr,
+            "device": "cpu" if os.environ.get("FORCE_CPU") == "1" else "gpu",
             "weights_at": os.environ.get("HF_HOME"),
             "volume_free_gb": _free, "volume_writable": _vol_ok,
             "container_free_gb": _local_free, "container_writable": _local_ok,

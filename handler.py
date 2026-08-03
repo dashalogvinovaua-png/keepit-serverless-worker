@@ -580,20 +580,34 @@ def run_tts(spec):
 
     if not os.path.exists(AUDIO_PY):
         return {"error": "речевое окружение не установлено (/opt/audio-venv) — нужна пересборка образа"}
-    try:
-        p = subprocess.run(
-            [AUDIO_PY, AUDIO_WORKER],
-            input=json.dumps(spec), capture_output=True, text=True,
-            timeout=int(spec.get("timeout", 600)),
-        )
-    except subprocess.TimeoutExpired:
-        return {"error": "движок речи не уложился в отведённое время"}
-    if p.returncode != 0:
-        return {"error": "движок речи упал", "stderr": (p.stderr or "")[-800:]}
-    try:
-        return json.loads(p.stdout.strip().splitlines()[-1])
-    except Exception as e:  # noqa: BLE001
-        return {"error": "ответ движка не разобрать: %s" % e, "stdout": (p.stdout or "")[-400:]}
+    def call(force_cpu=False):
+        env = dict(os.environ)
+        if force_cpu:
+            env["FORCE_CPU"] = "1"
+        try:
+            p = subprocess.run(
+                [AUDIO_PY, AUDIO_WORKER],
+                input=json.dumps(spec), capture_output=True, text=True, env=env,
+                timeout=int(spec.get("timeout", 600)),
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": "движок речи не уложился в отведённое время"}
+        if p.returncode != 0:
+            return {"error": "движок речи упал", "stderr": (p.stderr or "")[-800:]}
+        try:
+            return json.loads(p.stdout.strip().splitlines()[-1])
+        except Exception as e:  # noqa: BLE001
+            return {"error": "ответ движка не разобрать: %s" % e, "stdout": (p.stdout or "")[-400:]}
+
+    out = call()
+    # Если карта не приняла наши ядра CUDA — считаем на процессоре. Медленнее, но работает,
+    # и это лучше, чем отказ до следующей пересборки образа.
+    text = json.dumps(out, ensure_ascii=False)
+    if not out.get("ok") and ("CUDA" in text or "kernel image" in text):
+        out = call(force_cpu=True)
+        if out.get("ok"):
+            out["note"] = "посчитано на процессоре: карта не приняла ядра CUDA нашего окружения"
+    return out
 
 
 def diagnose_nodes(want_classes):
