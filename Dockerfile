@@ -100,6 +100,59 @@ RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insi
  (cd models && wget -q -O buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
    && mkdir -p buffalo_l && (cd buffalo_l && unzip -oq ../buffalo_l.zip) && rm -f buffalo_l.zip || true)
 
+# ── ЗВУК: ноды речи и музыки для сервиса audio (platform/services/audio) ─────
+# Речь  — ComfyUI-Qwen3-TTS (Qwen3-TTS 1.7B, Apache 2.0): готовые тембры, голос по описанию, клон.
+# Музыка — ComfyUI-RT-HeartMuLa (HeartMuLa-3B, Apache 2.0): песня с вокалом по тексту и тегам.
+# Веса (~16 ГБ) в образ НЕ кладём — они на сетевом томе, см. dl_audio_models.py.
+#
+# ЭТО ВТОРОЙ ЗАХОД. Первый (f33ac72) валидатор принял, но сборка упала через десять минут внутри
+# docker, и вероятная причина названа в откате b40d6bb: авторская проверка «torch не сдвинулся»
+# стояла как assert и обязана была валить сборку. Здесь та же цель достигнута иначе:
+#   1) requirements ставятся С ОГРАНИЧЕНИЯМИ, а если резолвер упирается — вторым заходом с
+#      --no-deps: так пакет ноды встаёт, но НИЧЕГО не тянет за собой и сдвинуть torch не может;
+#   2) вместо assert идёт ВОЗВРАТ зафиксированных версий: строка constraints ставится как
+#      requirements, и torch/numpy/transformers возвращаются к тем, что были до аудио-нод;
+#   3) все шаги мягкие. Сломанная аудио-нода не должна ронять сборку — на этом образе живут
+#      video и photo, и лучше выпустить образ без звука, чем оставить ферму без картинки.
+# Форма закрепления коммитов оставлена ровно та, которую валидатор RunPod принял: поверхностный
+# клон плюс дозагрузка коммита. Полный `git clone` он отвергает целиком.
+RUN cd /comfyui/custom_nodes \
+ && git clone --depth 1 https://github.com/DarioFT/ComfyUI-Qwen3-TTS.git \
+ && (cd ComfyUI-Qwen3-TTS && git fetch -q --depth 1 origin 17c22adb80a6 && git checkout -q FETCH_HEAD \
+     || echo "?? закреплённый коммит Qwen3-TTS не дозагрузился — остаюсь на ветке по умолчанию") \
+ && cd /comfyui/custom_nodes \
+ && git clone --depth 1 https://github.com/monnky/ComfyUI-RT-HeartMuLa.git \
+ && (cd ComfyUI-RT-HeartMuLa && git fetch -q --depth 1 origin 64e5419bf4aa && git checkout -q FETCH_HEAD \
+     || echo "?? закреплённый коммит HeartMuLa не дозагрузился — остаюсь на ветке по умолчанию") \
+ && echo "AUDIO: ноды склонированы"
+
+# Что было ДО аудио-нод — записываем, этим же файлом потом и восстановим.
+RUN pip freeze 2>/dev/null | grep -iE '^(torch|torchvision|torchaudio|numpy|transformers)==' > /tmp/audio_con.txt; \
+    echo "── зафиксировано перед аудио-нодами ──"; cat /tmp/audio_con.txt
+
+# Речь. Сначала честная установка с ограничениями, при отказе резолвера — без зависимостей.
+RUN grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
+      /comfyui/custom_nodes/ComfyUI-Qwen3-TTS/requirements.txt > /tmp/req-tts.txt; \
+    pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req-tts.txt \
+      || pip install --no-cache-dir --no-deps -r /tmp/req-tts.txt \
+      || echo "!! requirements Qwen3-TTS встали не полностью — проверка старта покажет, жива ли нода"
+
+# Музыка. Тот же порядок.
+RUN grep -viE '^(torch|torchvision|torchaudio|numpy|transformers)([<>=!].*)?$' \
+      /comfyui/custom_nodes/ComfyUI-RT-HeartMuLa/requirements.txt > /tmp/req-mula.txt; \
+    pip install --no-cache-dir -c /tmp/audio_con.txt -r /tmp/req-mula.txt \
+      || pip install --no-cache-dir --no-deps -r /tmp/req-mula.txt \
+      || echo "!! requirements HeartMuLa встали не полностью — проверка старта покажет, жива ли нода"
+
+# ВОЗВРАТ ВЕРСИЙ вместо падения сборки. Если что-то всё же подвинуло torch/numpy/transformers —
+# ставим обратно те, что были. Сдвиг torch кладёт Wan, LTX, SCAIL и ReActor разом, поэтому шаг
+# обязателен; но он ЧИНИТ, а не валит, и потому безопасен для чужих веток.
+RUN pip install --no-cache-dir -r /tmp/audio_con.txt || echo "!! вернуть зафиксированные версии не удалось"
+RUN python3 -c "import torch; print('torch после аудио-нод:', torch.__version__)"
+
+# Папки, куда ноды смотрят за весами на томе (extra_model_paths.yaml уже указывает на том).
+RUN mkdir -p /comfyui/models/Qwen3-TTS /comfyui/models/HeartMuLa
+
 # ── ПРАВДА О СБОРКЕ В ЛОГЕ ───────────────────────────────────────────────────
 # Поднимаем ComfyUI в режиме CI (только загрузка нод, без сервера) и смотрим, зарегистрировалась ли
 # нода. Проверка МЯГКАЯ — билд не валит, но в логе сборки сразу видно, поедет face-swap или нет.
@@ -110,6 +163,10 @@ RUN (cd /comfyui && timeout 600 python main.py --quick-test-for-ci --cpu > /tmp/
       echo "REACTOR: в логе загрузки нод ReActor не видно" >> /reactor_status.txt; \
     fi; \
     grep -iE "reactor|insightface|import failed|traceback" /tmp/ci.log | head -30 || true; \
-    echo "─── итог ───"; cat /reactor_status.txt
+    echo "─── итог ───"; cat /reactor_status.txt; \
+    echo "─── аудио-ноды ───"; \
+    grep -qi "qwen3" /tmp/ci.log && echo "AUDIO: ComfyUI увидел ноды Qwen3-TTS" || echo "AUDIO: нод Qwen3-TTS в логе НЕТ"; \
+    grep -qi "heartmula" /tmp/ci.log && echo "AUDIO: ComfyUI увидел ноды HeartMuLa" || echo "AUDIO: нод HeartMuLa в логе НЕТ"; \
+    grep -iE "qwen3|heartmula" /tmp/ci.log | head -20 || true
 
 # requests уже есть в базовом образе (использует стоковый handler).
