@@ -111,11 +111,23 @@ def run_chatterbox(job):
     return wave, model.sr
 
 
+TTSUK_DIR = "/opt/audio-models/ttsuk"
+
+
 def run_ttsuk(job):
     """tts_uk (RAD-TTS++, MIT): украинский родными голосами. Клона нет, голоса три.
 
     Возвращает тройку (мел-спектрограммы, волна, статистика) — нам нужна волна; частота 44 100.
     """
+    # Пакет качает и ищет веса в ТЕКУЩЕМ каталоге, а не в HF_HOME. Поэтому переходим туда, где
+    # они лежат (или куда их можно положить), и только потом импортируем.
+    for cand in (TTSUK_DIR, LOCAL_CACHE + "/ttsuk", "/tmp/ttsuk"):
+        try:
+            os.makedirs(cand, exist_ok=True)
+            os.chdir(cand)
+            break
+        except Exception:  # noqa: BLE001
+            continue
     from tts_uk.inference import synthesis
     voice = job.get("voice") or "tetiana"          # tetiana, lada — женские; mykyta — мужской
     _mels, wave, stats = synthesis(

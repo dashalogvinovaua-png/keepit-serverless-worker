@@ -136,12 +136,22 @@ ENV HF_HUB_DISABLE_XET=1
 # ЖЁСТКО: если веса не легли в образ, движок в работе их уже не докачает (на воркере квота на
 # запись). Значит образ без весов бесполезен для звука — пусть сборка падает здесь, а не задача
 # у владелицы.
-RUN /opt/audio-venv/bin/python -c "from huggingface_hub import snapshot_download; p = snapshot_download('ResembleAI/chatterbox'); print('AUDIO: веса Chatterbox в образе:', p)"
+# Мягко: если веса не лягут в образ, движок попробует взять их в работе — на диск контейнера,
+# где, по пробе воркера, свободно 5 ГБ. Жёсткий вариант ронял сборку, а образ без звука хуже,
+# чем образ, который хотя бы попробует.
+RUN /opt/audio-venv/bin/python -c "from huggingface_hub import snapshot_download; p = snapshot_download('ResembleAI/chatterbox'); print('AUDIO: веса Chatterbox в образе:', p)" \
+ || echo "!! веса Chatterbox не легли в образ — движок попробует скачать их в работе"
 # tts_uk качает веса ПРИ ИМПОРТЕ модуля (hf_hub_download на уровне файла), поэтому достаточно
 # его импортировать — синтез для этого не нужен. Первая версия этого шага гоняла настоящий синтез
 # тремя голосами на процессоре сборщика и растянула сборку на десятки минут без пользы.
-RUN /opt/audio-venv/bin/python -c "import tts_uk.inference as m; print('AUDIO: веса tts_uk в образе, голоса:', list(getattr(m, 'voices', {}) or {}))"
-RUN echo "AUDIO: размер весов в образе:" && du -sh /opt/audio-models && ls /opt/audio-models
+# ВАЖНО ПРО tts_uk: он качает веса в ТЕКУЩИЙ КАТАЛОГ (hf_hub_download с local_dir='.'), а не в
+# HF_HOME. Поэтому импорт делаем из заранее выбранной папки — тогда веса лягут именно туда, и
+# работник звука потом читает их оттуда же. Без этого веса «терялись»: HF_HOME мы настроили, а
+# пакет им не пользуется.
+RUN mkdir -p /opt/audio-models/ttsuk && cd /opt/audio-models/ttsuk \
+ && /opt/audio-venv/bin/python -c "import tts_uk.inference as m; print('AUDIO: веса tts_uk в образе, голоса:', list(getattr(m, 'voices', {}) or {}))" \
+ || echo "!! веса tts_uk не легли в образ — движок попробует скачать их в работе"
+RUN echo "AUDIO: размер весов в образе:" && du -sh /opt/audio-models 2>/dev/null || echo "AUDIO: весов в образе нет"
 
 # Работник звука: его зовёт handler подпроцессом.
 COPY audio_worker.py /opt/audio_worker.py
