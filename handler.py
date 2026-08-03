@@ -570,6 +570,32 @@ def get_image_data(filename, subfolder, image_type):
         return None
 
 
+AUDIO_PY = "/opt/audio-venv/bin/python"
+AUDIO_WORKER = "/opt/audio_worker.py"
+
+
+def run_tts(spec):
+    """Отдать задание речевому движку в его собственном окружении и вернуть звук."""
+    import subprocess
+
+    if not os.path.exists(AUDIO_PY):
+        return {"error": "речевое окружение не установлено (/opt/audio-venv) — нужна пересборка образа"}
+    try:
+        p = subprocess.run(
+            [AUDIO_PY, AUDIO_WORKER],
+            input=json.dumps(spec), capture_output=True, text=True,
+            timeout=int(spec.get("timeout", 600)),
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": "движок речи не уложился в отведённое время"}
+    if p.returncode != 0:
+        return {"error": "движок речи упал", "stderr": (p.stderr or "")[-800:]}
+    try:
+        return json.loads(p.stdout.strip().splitlines()[-1])
+    except Exception as e:  # noqa: BLE001
+        return {"error": "ответ движка не разобрать: %s" % e, "stdout": (p.stdout or "")[-400:]}
+
+
 def diagnose_nodes(want_classes):
     """Что ComfyUI реально загрузил и на чём споткнулся. Ни генерации, ни GPU."""
     import importlib.util
@@ -653,6 +679,13 @@ def handler(job):
     # что лежит в custom_nodes, какие классы зарегистрированы и КАКАЯ БИБЛИОТЕКА не нашлась.
     if isinstance(job_input, dict) and job_input.get("diagnose"):
         return diagnose_nodes(job_input.get("classes") or [])
+
+    # ЗВУК — ОТДЕЛЬНОЙ ВЕТКОЙ, МИМО ComfyUI (input: {"tts": {...}}).
+    # Речевые движки живут в своём окружении /opt/audio-venv и зовутся подпроцессом: их torch
+    # никогда не встретится с torch ComfyUI, а значит не заденет Wan, LTX, SCAIL и ReActor.
+    # Заодно они не зависят от того, поднялись ли ноды: у звука своя дорога.
+    if isinstance(job_input, dict) and job_input.get("tts"):
+        return run_tts(job_input["tts"])
 
     # Make sure that the input is valid
     validated_data, error_message = validate_input(job_input)

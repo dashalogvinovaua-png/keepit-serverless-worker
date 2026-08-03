@@ -111,7 +111,25 @@ RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insi
 # не встретятся в одном процессе никогда, и ComfyUI про звук знать не обязан.
 RUN python3 -m venv --copies /opt/audio-venv \
  && /opt/audio-venv/bin/pip install --no-cache-dir --upgrade pip \
- && echo "AUDIO: отдельное окружение /opt/audio-venv готово (пустое, пакеты приедут отдельно)"
+ && echo "AUDIO: отдельное окружение /opt/audio-venv готово"
+
+# Свой torch — ТОЛЬКО внутрь audio-venv. Общее окружение ComfyUI этой строкой не затрагивается
+# вообще: другой интерпретатор, другой каталог пакетов, другой процесс во время работы.
+RUN /opt/audio-venv/bin/pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu124 \
+ || echo "!! torch в audio-venv не встал — движки речи не поедут, остальное не тронуто"
+
+# Речь: Chatterbox Multilingual (MIT, 23 языка, клон голоса) и tts_uk (MIT, украинский родными
+# голосами). Ставим мягко: не встали — образ всё равно выходит, видео и фото это не касается.
+RUN /opt/audio-venv/bin/pip install --no-cache-dir chatterbox-tts \
+ || echo "!! chatterbox-tts не встал"
+RUN /opt/audio-venv/bin/pip install --no-cache-dir tts-uk \
+ || echo "!! tts-uk не встал"
+
+# Работник звука: его зовёт handler подпроцессом.
+COPY audio_worker.py /opt/audio_worker.py
+
+# Что именно доехало — видно в логе сборки, а не выясняется на первой задаче.
+RUN /opt/audio-venv/bin/python -c "import importlib, sys; [sys.stdout.write('AUDIO: %s %s\n' % (m, 'есть' if importlib.util.find_spec(m) else 'НЕТ')) for m in ('torch','torchaudio','chatterbox','tts_uk')]" || true
 
 # ── ЖЁСТКИЕ ВОРОТА СБОРКИ ───────────────────────────────────────────────────
 # Мягкие проверки уже подвели: образ вышел «зелёным», а про поломку видео узнали на готовом ролике.
