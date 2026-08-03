@@ -601,7 +601,18 @@ def diagnose_nodes(want_classes):
     import importlib.util
     import traceback
 
-    out = {"custom_nodes": [], "registered": {}, "import_errors": {}, "pip": {}}
+    out = {"custom_nodes": [], "registered": {}, "import_errors": {}, "pip": {}, "disk": {}}
+    # Сколько места на общем томе и на диске контейнера — по этому решается, куда класть веса.
+    try:
+        import shutil
+        for name, path in (("том", "/runpod-volume"), ("контейнер", "/")):
+            try:
+                u = shutil.disk_usage(path)
+                out["disk"][name] = {"свободно_ГБ": round(u.free / 1e9, 1), "всего_ГБ": round(u.total / 1e9, 1)}
+            except Exception as e:  # noqa: BLE001
+                out["disk"][name] = str(e)
+    except Exception:  # noqa: BLE001
+        pass
     root = "/comfyui/custom_nodes"
     try:
         out["custom_nodes"] = sorted(os.listdir(root))

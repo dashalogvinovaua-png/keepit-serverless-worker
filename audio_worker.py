@@ -21,7 +21,26 @@ import os
 import sys
 import time
 
-os.environ.setdefault("HF_HOME", "/runpod-volume/hf-cache")
+# ГДЕ ЛЕЖАТ ВЕСА. Сначала сетевой том: он переживает холодный старт, и качать надо один раз.
+# Но том общий с видео и фото, и он бывает полон — тогда вместо весов приезжает «Disk quota
+# exceeded». В этом случае уходим на диск контейнера: веса будут качаться при каждом холодном
+# старте (дороже по времени), зато движок работает, а не отказывает целиком.
+VOLUME_CACHE = "/runpod-volume/hf-cache"
+LOCAL_CACHE = "/root/.cache/huggingface"
+
+
+def _volume_has_room(need_gb=6):
+    """Хватит ли места на томе. Спрашиваем систему, а не надеемся."""
+    import shutil
+    try:
+        free = shutil.disk_usage("/runpod-volume").free / 1e9
+        return free >= need_gb, round(free, 1)
+    except Exception:  # noqa: BLE001
+        return False, None
+
+
+_room, _free = _volume_has_room()
+os.environ.setdefault("HF_HOME", VOLUME_CACHE if _room else LOCAL_CACHE)
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")   # xet рвётся на сетевом томе, проверено на весах
 
 _cache = {}
@@ -103,14 +122,19 @@ def main():
         data = _wav_bytes(wave, sr)
         print(json.dumps({
             "ok": True, "engine": engine, "sample_rate": sr,
+            "weights_at": os.environ.get("HF_HOME"), "volume_free_gb": _free,
             "seconds": round(len(data) / (sr * 2), 2),
             "took": round(time.time() - started, 1),
             "audio": base64.b64encode(data).decode(),
         }))
     except Exception as e:  # noqa: BLE001
         import traceback
+        msg = str(e)
+        if "quota" in msg.lower() or "no space" in msg.lower():
+            msg = ("места под веса не осталось: на сетевом томе свободно %s ГБ, диск контейнера "
+                   "тоже полон. Нужно освободить том — это общая площадь с видео и фото." % _free)
         print(json.dumps({"ok": False, "engine": engine,
-                          "error": str(e)[:400],
+                          "error": msg[:400],
                           "trace": traceback.format_exc().strip().splitlines()[-4:]}))
 
 
