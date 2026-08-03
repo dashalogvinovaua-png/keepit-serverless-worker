@@ -63,15 +63,20 @@ def run_chatterbox(job):
 
 
 def run_ttsuk(job):
-    """tts_uk (RAD-TTS++, MIT): украинский родными голосами. Клона нет, голоса три."""
-    from tts_uk.tts import synthesis
+    """tts_uk (RAD-TTS++, MIT): украинский родными голосами. Клона нет, голоса три.
+
+    Возвращает тройку (мел-спектрограммы, волна, статистика) — нам нужна волна; частота 44 100.
+    """
+    from tts_uk.inference import synthesis
     voice = job.get("voice") or "tetiana"          # tetiana, lada — женские; mykyta — мужской
-    wave, sr = synthesis(
+    _mels, wave, stats = synthesis(
         text=job["text"],
         voice=voice,
-        speed=float(job.get("speed", 1.0)),
+        n_takes=int(job.get("takes", 1)),
+        use_latest_take=False,
     )
-    return wave, sr
+    _cache["ttsuk_stats"] = stats
+    return wave, 44100
 
 
 ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk}
