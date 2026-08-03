@@ -133,14 +133,14 @@ RUN /opt/audio-venv/bin/pip install --no-cache-dir tts-uk \
 # три гигабайта, зато движок готов к работе с первой секунды и не зависит от чужой площади.
 ENV HF_HOME=/opt/audio-models
 ENV HF_HUB_DISABLE_XET=1
-RUN /opt/audio-venv/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('ResembleAI/chatterbox', allow_patterns=['*.json','*.safetensors','*.pt','*.txt','*.model']); print('AUDIO: веса Chatterbox в образе')" \
- || echo "!! веса Chatterbox не скачались — движок попробует взять их в работе"
-RUN /opt/audio-venv/bin/python -c "import tts_uk, importlib; from tts_uk.inference import synthesis; print('AUDIO: tts_uk импортируется, веса подтянутся при первом синтезе в образе')" \
- || echo "!! tts_uk не импортируется"
-# Прогреваем tts_uk настоящим коротким синтезом: так его веса тоже осядут в образе.
-RUN /opt/audio-venv/bin/python -c "from tts_uk.inference import synthesis; synthesis(text='проба', voice='tetiana', n_takes=1, use_latest_take=False); print('AUDIO: веса tts_uk в образе')" \
- || echo "!! прогрев tts_uk не удался — веса поедут качаться в работе"
-RUN du -sh /opt/audio-models 2>/dev/null || true
+# ЖЁСТКО: если веса не легли в образ, движок в работе их уже не докачает (на воркере квота на
+# запись). Значит образ без весов бесполезен для звука — пусть сборка падает здесь, а не задача
+# у владелицы.
+RUN /opt/audio-venv/bin/python -c "from huggingface_hub import snapshot_download; p = snapshot_download('ResembleAI/chatterbox'); print('AUDIO: веса Chatterbox в образе:', p)"
+# tts_uk тянет веса при первом синтезе. Прогреваем НАСТОЯЩИМ синтезом всеми тремя голосами —
+# иначе в работе он полезет в сеть и упрётся в ту же квоту. Тоже жёстко.
+RUN /opt/audio-venv/bin/python -c "from tts_uk.inference import synthesis; [synthesis(text='проба голосу', voice=v, n_takes=1, use_latest_take=False) for v in ('tetiana','lada','mykyta')]; print('AUDIO: веса tts_uk в образе, три голоса прогреты')"
+RUN echo "AUDIO: размер весов в образе:" && du -sh /opt/audio-models && ls /opt/audio-models
 
 # Работник звука: его зовёт handler подпроцессом.
 COPY audio_worker.py /opt/audio_worker.py

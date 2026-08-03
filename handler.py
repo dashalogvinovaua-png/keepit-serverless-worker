@@ -647,6 +647,32 @@ def diagnose_nodes(want_classes):
         except Exception:  # noqa: BLE001
             out["import_errors"][name] = traceback.format_exc().strip().splitlines()[-6:]
 
+    # Что с отдельным окружением звука: есть ли оно, что в нём стоит и лежат ли веса в образе.
+    out["audio"] = {}
+    try:
+        import subprocess
+        out["audio"]["venv"] = os.path.isdir("/opt/audio-venv")
+        out["audio"]["weights_dir"] = os.path.isdir("/opt/audio-models")
+        if out["audio"]["weights_dir"]:
+            total = 0
+            for root, _dirs, files in os.walk("/opt/audio-models"):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            out["audio"]["weights_gb"] = round(total / 1e9, 2)
+            out["audio"]["weights_top"] = sorted(os.listdir("/opt/audio-models"))[:10]
+        if out["audio"]["venv"]:
+            r = subprocess.run(["/opt/audio-venv/bin/python", "-c",
+                                "import importlib.util as u, json;"
+                                "print(json.dumps({m: bool(u.find_spec(m)) for m in "
+                                "('torch','torchaudio','chatterbox','tts_uk')}))"],
+                               capture_output=True, text=True, timeout=120)
+            out["audio"]["packages"] = r.stdout.strip() or r.stderr[-200:]
+    except Exception as e:  # noqa: BLE001
+        out["audio"]["error"] = str(e)[:200]
+
     # Версии ключевых пакетов — по ним видно, сдвинулся ли torch и встали ли зависимости нод.
     try:
         import importlib.metadata as md
