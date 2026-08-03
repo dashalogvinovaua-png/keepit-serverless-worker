@@ -137,9 +137,10 @@ ENV HF_HUB_DISABLE_XET=1
 # запись). Значит образ без весов бесполезен для звука — пусть сборка падает здесь, а не задача
 # у владелицы.
 RUN /opt/audio-venv/bin/python -c "from huggingface_hub import snapshot_download; p = snapshot_download('ResembleAI/chatterbox'); print('AUDIO: веса Chatterbox в образе:', p)"
-# tts_uk тянет веса при первом синтезе. Прогреваем НАСТОЯЩИМ синтезом всеми тремя голосами —
-# иначе в работе он полезет в сеть и упрётся в ту же квоту. Тоже жёстко.
-RUN /opt/audio-venv/bin/python -c "from tts_uk.inference import synthesis; [synthesis(text='проба голосу', voice=v, n_takes=1, use_latest_take=False) for v in ('tetiana','lada','mykyta')]; print('AUDIO: веса tts_uk в образе, три голоса прогреты')"
+# tts_uk качает веса ПРИ ИМПОРТЕ модуля (hf_hub_download на уровне файла), поэтому достаточно
+# его импортировать — синтез для этого не нужен. Первая версия этого шага гоняла настоящий синтез
+# тремя голосами на процессоре сборщика и растянула сборку на десятки минут без пользы.
+RUN /opt/audio-venv/bin/python -c "import tts_uk.inference as m; print('AUDIO: веса tts_uk в образе, голоса:', list(getattr(m, 'voices', {}) or {}))"
 RUN echo "AUDIO: размер весов в образе:" && du -sh /opt/audio-models && ls /opt/audio-models
 
 # Работник звука: его зовёт handler подпроцессом.
