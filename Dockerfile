@@ -377,3 +377,53 @@ RUN grep -qi "reactor" /tmp/ci.log \
  || (echo "!! ВОРОТА: ComfyUI не увидел ReActor при загрузке нод — образ НЕ выпускаем" && exit 1)
 
 # requests уже есть в базовом образе (использует стоковый handler).
+
+# ── HEARTMULA 3B — МУЗЫКА НА ФЕРМЕ ──────────────────────────────────────────
+# ЗАЧЕМ. Музыки у фермы нет ВООБЩЕ: ACE-Step владелица сняла, YuE пробовали только на поде.
+# Любая песня, минус, джингл, рингтон, аудиологотип или подложка сегодня возможны лишь через
+# облако, а оно в минусе. Это самая большая дыра, и закрывает её именно этот движок.
+#
+# ПОЧЕМУ HEARTMULA, А НЕ YuE. Измерено руками на поде, а не взято из описаний: дорожка в
+# тридцать секунд считается 44 СЕКУНДЫ против ОДИННАДЦАТИ МИНУТ у YuE. Это примерно
+# пятнадцатикратная разница в цене на ту же музыку — разница между «музыка есть» и «музыку
+# дорого включать». Лицензия прочитана глазами: код heartlib несёт настоящий текст Apache 2.0,
+# все три репозитория весов заявлены Apache 2.0.
+#
+# ЧЕСТНО ПРО РИСК: веса весят 21 ГБ (модель 15.75 + кодек 6.64), и вместе с CosyVoice образ
+# подходит к тридцатиминутному пределу сборки вплотную. Если не влезем — заменой идёт DiffRhythm
+# на 2.2 ГБ, и флаг движка остаётся здесь, чтобы HeartMuLa доложить позже.
+RUN python3 -m venv --copies /opt/heartmula-venv \
+ && /opt/heartmula-venv/bin/pip install --no-cache-dir --upgrade pip "setuptools<81" wheel \
+ && echo "HEARTMULA: окружение готово"
+
+# torch СРАЗУ ПОД BLACKWELL. На поде была карта Ampere и хватало cu124, но на ферме нам выдают
+# RTX PRO 6000 Blackwell (sm_120), а ядра под неё есть только с CUDA 12.8. Ставим правильный
+# torch с первого раза: доставлять его вторым шагом — лишние три гигабайта в образе.
+RUN /opt/heartmula-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
+      --index-url https://download.pytorch.org/whl/cu128 \
+ || echo "!! HEARTMULA: torch не встал"
+
+ARG HEARTLIB_CODE=3783bdb8441f2c298b1e64c8651173aac200361c
+RUN git clone -q https://github.com/HeartMuLa/heartlib.git /opt/heartlib \
+ && cd /opt/heartlib && git checkout -q ${HEARTLIB_CODE} && rm -rf /opt/heartlib/.git \
+ && /opt/heartmula-venv/bin/pip install --no-cache-dir -e /opt/heartlib \
+ || echo "!! HEARTMULA: код не встал"
+
+# Веса ТРЕМЯ репозиториями — так их раскладывает сам автор, и путь жёстко зашит в его скрипт.
+ENV HF_HUB_DISABLE_XET=1
+RUN /opt/heartmula-venv/bin/python -c "\
+from huggingface_hub import snapshot_download as d;\
+print('gen  :', d('HeartMuLa/HeartMuLaGen', local_dir='/opt/audio-models/heartmula'));\
+print('mula :', d('HeartMuLa/HeartMuLa-oss-3B-happy-new-year', local_dir='/opt/audio-models/heartmula/HeartMuLa-oss-3B'));\
+print('codec:', d('HeartMuLa/HeartCodec-oss-20260123', local_dir='/opt/audio-models/heartmula/HeartCodec-oss'))" \
+ || echo "!! HEARTMULA: веса не легли в образ"
+
+# ВОРОТА: движок обязан импортироваться в самом образе. Проверяем суть, а не версию пакета —
+# на версии мы уже роняли сборку зря, а «зелёный» образ, который не умеет играть, ещё хуже.
+RUN /opt/heartmula-venv/bin/python -c "\
+import heartlib; print('HEARTMULA: код импортируется в образе');\
+import os; p='/opt/audio-models/heartmula';\
+assert os.path.isdir(p+'/HeartMuLa-oss-3B'), 'нет весов модели';\
+assert os.path.isdir(p+'/HeartCodec-oss'), 'нет весов кодека';\
+print('HEARTMULA: веса на месте — ворота пройдены')" \
+ || (echo "!! ВОРОТА: HeartMuLa не собрана — образ НЕ выпускаем" && exit 1)

@@ -358,14 +358,65 @@ def run_cosy3(job):
     return wave, model.sample_rate
 
 
-ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk, "higgs": run_higgs, "cosy3": run_cosy3}
+HEARTMULA_DIR = "/opt/audio-models/heartmula"
+
+
+def run_heartmula(job):
+    """HeartMuLa 3B (Apache 2.0): МУЗЫКА — песня целиком или инструментал.
+
+    Закрывает дыру, из-за которой ферма не умела ни подложки, ни рингтона, ни аудиологотипа:
+    ACE-Step сняли, YuE осталась на поде. Замерено руками: дорожка в тридцать секунд считается
+    сорок четыре секунды против одиннадцати минут у YuE — примерно в пятнадцать раз дешевле.
+
+    Автор запускает движок СВОИМ скриптом с путями в аргументах, а не библиотекой, поэтому и мы
+    зовём скрипт: свой обход его внутренностей означал бы чинить чужой код на каждом обновлении.
+    Возвращаем ГОТОВЫЙ mp3 байтами — перекодировать его в wav незачем, музыку так и отдают.
+
+    Вход:  {"engine":"heartmula", "lyrics":"[verse]…" | None, "tags":"pop, male vocal…",
+            "durationSec":30, "temperature":1.0, "topk":50}
+    Инструментал — это просто пустая лирика: шесть музыкальных видов из семи вокала не требуют.
+    """
+    import subprocess
+    import tempfile
+
+    lyrics = (job.get("lyrics") or "[instrumental]").strip()
+    tags = (job.get("tags") or "calm instrumental background, soft piano, no vocals").strip()
+    ms = int(float(job.get("durationSec") or 30) * 1000)
+
+    tmp = tempfile.mkdtemp(prefix="hm-")
+    lf, tf = os.path.join(tmp, "lyrics.txt"), os.path.join(tmp, "tags.txt")
+    out = os.path.join(tmp, "out.mp3")
+    open(lf, "w").write(lyrics + "\n")
+    open(tf, "w").write(tags + "\n")
+
+    cmd = ["/opt/heartmula-venv/bin/python", "/opt/heartlib/examples/run_music_generation.py",
+           "--model_path", HEARTMULA_DIR, "--version", "3B",
+           "--lyrics", lf, "--tags", tf, "--save_path", out,
+           "--max_audio_length_ms", str(ms),
+           # На одной карте модель и кодек вместе не помещаются: автор для этого и завёл
+           # ленивую загрузку — модули поднимаются по очереди и выгружаются после счёта.
+           "--lazy_load", "true",
+           "--topk", str(int(job.get("topk", 50))),
+           "--temperature", str(float(job.get("temperature", 1.0)))]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=int(job.get("timeout", 1800)))
+    if not os.path.exists(out):
+        tail = (p.stderr or p.stdout or "")[-400:]
+        raise RuntimeError("HeartMuLa не отдала файл: %s" % tail)
+    data = open(out, "rb").read()
+    # Байты вместо тензора: обёртка ниже это понимает и не трогает готовый mp3.
+    return data, 44100
+
+
+ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk, "higgs": run_higgs,
+           "cosy3": run_cosy3, "heartmula": run_heartmula}
 
 
 def _one(job, engine, fn, started):
     """Одна дорожка: посчитать и завернуть в ответ. Ошибку объясняем словами, а не следом стека."""
     try:
         wave, sr = fn(job)
-        data = _wav_bytes(wave, sr)
+        # Музыкальные движки отдают ГОТОВЫЙ файл байтами — перекодировать его нечем и незачем.
+        data = bytes(wave) if isinstance(wave, (bytes, bytearray)) else _wav_bytes(wave, sr)
         return {
             "ok": True, "engine": engine, "sample_rate": sr,
             "device": "cpu" if os.environ.get("FORCE_CPU") == "1" else "gpu",
@@ -446,7 +497,7 @@ def main():
             piece = dict(common)
             piece.update(item if isinstance(item, dict) else {})
             t0 = time.time()
-            if not (piece.get("text") or "").strip():
+            if engine not in ("heartmula",) and not (piece.get("text") or "").strip():
                 out.append({"ok": False, "error": "пустой текст", "id": piece.get("id")})
                 continue
             res = _one(piece, engine, fn, t0)
@@ -462,7 +513,9 @@ def main():
         print(json.dumps({"ok": False,
                           "error": "нет такого движка: %s (есть: %s)" % (engine, ", ".join(ENGINES))}))
         return
-    if not (job.get("text") or "").strip():
+    # Музыке текст не обязателен: инструментал — это и есть отсутствие слов, а шесть музыкальных
+    # видов из семи (подложка, рингтон, аудиологотип, эмбиенс, минус, джингл) вокала не требуют.
+    if engine not in ("heartmula",) and not (job.get("text") or "").strip():
         print(json.dumps({"ok": False, "error": "пустой текст"}))
         return
     res = _one(job, engine, fn, started)
