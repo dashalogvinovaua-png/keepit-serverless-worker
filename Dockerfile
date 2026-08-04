@@ -281,8 +281,26 @@ print('COSY3: ресурсы wetext:', snapshot_download('pengzhendong/wetext'))
 # целой пересборкой за то, что проба голосом ловит за секунды. Настоящий воротарь у нас —
 # прогон живого голоса на ферме, он уже поймал этот самый pkg_resources, когда диагноз молчал.
 RUN /opt/cosy3-venv/bin/pip install --no-cache-dir "setuptools<81" wheel \
- && /opt/cosy3-venv/bin/python -c "import pkg_resources; print('COSY3: pkg_resources на месте')" \
- || echo "!! COSY3: pkg_resources не встал — движок упадёт на первой фразе, чинить пином setuptools"
+ && echo "COSY3: setuptools поставлен"
+
+# ── ЖЁСТКИЕ ВОРОТА COSYVOICE 3 ──────────────────────────────────────────────
+# ГДЕ ГЕЙТ, А ГДЕ ЕГО БЫТЬ НЕ ДОЛЖНО. Мягкие шаги сегодня дважды выпустили «зелёный» образ,
+# который не умел говорить, а жёсткая проверка на ВЕРСИЮ ПАКЕТА (`import pkg_resources`) зря
+# уронила сборку на четырнадцатой минуте: версия — это не то, ради чего мы собираем образ.
+# Поэтому гейт стоит на том, что действительно важно: ДВИЖОК ОБЯЗАН ИМПОРТИРОВАТЬСЯ В САМОМ
+# ОБРАЗЕ. Тогда сборка падает на настоящей причине, а не на имени зависимости.
+#
+# Импортируем ИМЕННО ДВА места, а не одно:
+#   * `AutoModel` — точка входа, её зовёт работник;
+#   * `cosyvoice.flow.flow_matching` — модуль, который РЕАЛЬНО сломался на ферме. Его тянет не
+#     импорт входа, а загрузка модели по конфигу, поэтому проверять только вход недостаточно:
+#     ровно так мы и получили образ, где диагноз зелёный, а первая же фраза падает.
+# Весов для импорта не нужно — модель здесь не поднимается, только код.
+RUN /opt/cosy3-venv/bin/python -c "\
+from cosyvoice.cli.cosyvoice import AutoModel;\
+import cosyvoice.flow.flow_matching;\
+print('COSY3: движок импортируется в образе — ворота пройдены')" \
+ || (echo "!! ВОРОТА: CosyVoice 3 не импортируется в образе — образ НЕ выпускаем" && exit 1)
 
 RUN /opt/cosy3-venv/bin/python -c "import importlib, sys; [sys.stdout.write('COSY3: %s %s\n' % (m, 'есть' if importlib.util.find_spec(m) else 'НЕТ')) for m in ('torch','torchaudio','transformers','cosyvoice','matcha')]" || true
 
