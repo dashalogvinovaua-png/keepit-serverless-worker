@@ -223,12 +223,8 @@ RUN echo "AUDIO: размер того, что в образе:" && du -sh /opt/
 #      `torch.library.register_fake` — возвращаем пару 2.4.1 последним шагом;
 #   3. пакет ставится ДЕРЕВОМ ИСХОДНИКОВ с подмодулем Matcha-TTS: сам автор кладёт его в sys.path,
 #      а без подмодуля движок не заводится вовсе.
-# setuptools ставим ЯВНО: свежий venv его больше не кладёт, а `cosyvoice.flow.flow_matching`
-# импортирует `pkg_resources`, который живёт именно в нём. На поде это не всплыло — там код
-# работал на системном Python, где setuptools был. В чистом окружении движок падал на первой
-# же фразе: «No module named 'pkg_resources'». Поймано пробой голосом, а не диагнозом.
 RUN python3 -m venv --copies /opt/cosy3-venv \
- && /opt/cosy3-venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
+ && /opt/cosy3-venv/bin/pip install --no-cache-dir --upgrade pip \
  && echo "COSY3: отдельное окружение готово"
 
 ARG COSY3_CODE=074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc
@@ -266,6 +262,19 @@ RUN /opt/cosy3-venv/bin/python -c "\
 from modelscope import snapshot_download;\
 print('COSY3: ресурсы wetext:', snapshot_download('pengzhendong/wetext'))" \
  || echo "?? COSY3: ресурсы wetext не прогрелись — доберёт в работе"
+
+# setuptools — ПОСЛЕДНИМ ШАГОМ, И ЭТО НЕ СЛУЧАЙНО.
+# Сам по себе он нужен вот зачем: свежий venv его больше не кладёт, а `cosyvoice.flow.
+# flow_matching` импортирует `pkg_resources`, который живёт именно в setuptools. На поде это не
+# всплыло — там код шёл на системном Python, где setuptools был. В чистом окружении движок падал
+# на первой же фразе, и поймала это ПРОБА ГОЛОСОМ, а не диагноз: диагноз показывал всё зелёным.
+#
+# А СТОИТ ОН ЗДЕСЬ, В ХВОСТЕ, потому что первая попытка починки встала ровно в этом месте:
+# правка была в шаге создания окружения, то есть в САМОМ НАЧАЛЕ, и обесценила все слои после
+# себя — включая скачивание десяти гигабайт весов. Сборка не уложилась в предел и упала на
+# 35-й минуте. Дешёвые правки идут ПОСЛЕ тяжёлых слоёв, тогда пересборка трогает только хвост.
+RUN /opt/cosy3-venv/bin/pip install --no-cache-dir setuptools wheel \
+ && /opt/cosy3-venv/bin/python -c "import pkg_resources; print('COSY3: pkg_resources на месте')"
 
 RUN /opt/cosy3-venv/bin/python -c "import importlib, sys; [sys.stdout.write('COSY3: %s %s\n' % (m, 'есть' if importlib.util.find_spec(m) else 'НЕТ')) for m in ('torch','torchaudio','transformers','cosyvoice','matcha')]" || true
 
