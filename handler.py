@@ -579,11 +579,12 @@ AUDIO_WORKER = "/opt/audio_worker.py"
 ENGINE_PY = {"higgs": "/opt/higgs-venv/bin/python",
              "cosy3": "/opt/cosy3-venv/bin/python",
              # Музыка живёт в своём окружении: у неё свой torch и свои пакеты.
-             "heartmula": "/opt/heartmula-venv/bin/python"}
+             "heartmula": "/opt/heartmula-venv/bin/python",
+             "diffrhythm": "/opt/diffrhythm-venv/bin/python"}
 # Сколько ждём ответа. Higgs — модель на три миллиарда весов, и если карта не примет наши ядра
 # CUDA, считать придётся на процессоре: полчаса на тридцать секунд речи там не редкость.
 # Музыка считается дольше речи: тридцать секунд звука это около минуты работы карты.
-ENGINE_TIMEOUT = {"higgs": 1800, "cosy3": 900, "heartmula": 1800}
+ENGINE_TIMEOUT = {"higgs": 1800, "cosy3": 900, "heartmula": 1800, "diffrhythm": 1200}
 
 
 def run_tts(spec):

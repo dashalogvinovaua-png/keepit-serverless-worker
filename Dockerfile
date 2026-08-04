@@ -378,52 +378,77 @@ RUN grep -qi "reactor" /tmp/ci.log \
 
 # requests уже есть в базовом образе (использует стоковый handler).
 
-# ── HEARTMULA 3B — МУЗЫКА НА ФЕРМЕ ──────────────────────────────────────────
-# ЗАЧЕМ. Музыки у фермы нет ВООБЩЕ: ACE-Step владелица сняла, YuE пробовали только на поде.
-# Любая песня, минус, джингл, рингтон, аудиологотип или подложка сегодня возможны лишь через
-# облако, а оно в минусе. Это самая большая дыра, и закрывает её именно этот движок.
+# ── HEARTMULA: ПРОВЕРЕНА, НО В ОБРАЗ НЕ ВЛЕЗЛА ──────────────────────────────
+# Движок рабочий и лучший по цене: на поде дорожка в тридцать секунд считалась 44 секунды против
+# одиннадцати минут у YuE, лицензия Apache 2.0 прочитана глазами. Но веса весят 21 ГБ (модель
+# 15.75 + кодек 6.64), и вместе с десятью гигабайтами CosyVoice сборка ПЕРЕШЛА ТРИДЦАТИМИНУТНЫЙ
+# ПРЕДЕЛ: упала ровно на 30.3 минуты с «Build timeout exceeded». Дело не в коде — время съедает
+# отправка образа в реестр, и она растёт вместе с его весом.
 #
-# ПОЧЕМУ HEARTMULA, А НЕ YuE. Измерено руками на поде, а не взято из описаний: дорожка в
-# тридцать секунд считается 44 СЕКУНДЫ против ОДИННАДЦАТИ МИНУТ у YuE. Это примерно
-# пятнадцатикратная разница в цене на ту же музыку — разница между «музыка есть» и «музыку
-# дорого включать». Лицензия прочитана глазами: код heartlib несёт настоящий текст Apache 2.0,
-# все три репозитория весов заявлены Apache 2.0.
+# Поэтому сборка HeartMuLa убрана, а ФЛАГ ДВИЖКА `heartmula` ОСТАВЛЕН в audio_worker.py и
+# handler.py. Чтобы вернуть её, нужно ровно одно: место для тяжёлых весов вне образа — сетевой
+# том (он на 150 ГБ и занят моделями видео, это отдельное согласование) либо предел сборки выше.
+# Тогда сюда возвращается блок установки, а работник найдёт веса по тому же пути.
 #
-# ЧЕСТНО ПРО РИСК: веса весят 21 ГБ (модель 15.75 + кодек 6.64), и вместе с CosyVoice образ
-# подходит к тридцатиминутному пределу сборки вплотную. Если не влезем — заменой идёт DiffRhythm
-# на 2.2 ГБ, и флаг движка остаётся здесь, чтобы HeartMuLa доложить позже.
-RUN python3 -m venv --copies /opt/heartmula-venv \
- && /opt/heartmula-venv/bin/pip install --no-cache-dir --upgrade pip "setuptools<81" wheel \
- && echo "HEARTMULA: окружение готово"
+# Пока музыку закрывает DiffRhythm — 2.2 ГБ, Apache 2.0, те же шесть невокальных видов.
 
-# torch СРАЗУ ПОД BLACKWELL. На поде была карта Ampere и хватало cu124, но на ферме нам выдают
-# RTX PRO 6000 Blackwell (sm_120), а ядра под неё есть только с CUDA 12.8. Ставим правильный
-# torch с первого раза: доставлять его вторым шагом — лишние три гигабайта в образе.
-RUN /opt/heartmula-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
+
+# ── DIFFRHYTHM — МУЗЫКА, КОТОРАЯ ВЛЕЗАЕТ В ОБРАЗ ────────────────────────────
+# Ставится по прямому решению владелицы. Веса 6.1 ГБ против 21 ГБ у HeartMuLa, поэтому в предел
+# сборки укладывается. Проверено руками на поде: полторы минуты инструментала считаются 63
+# секунды, песня с английским текстом — 8.65 секунды.
+#
+# ⚠️ ПРАВА: ЛИЦЕНЗИЯ ЗДЕСЬ НЕОДНОРОДНАЯ, И ЭТО НАДО ЗНАТЬ, А НЕ ОБНАРУЖИТЬ ПОТОМ.
+#   код DiffRhythm            — Apache 2.0, чисто;
+#   ASLP-lab/DiffRhythm-1_2   — лицензия НЕ УКАЗАНА вовсе;
+#   ASLP-lab/DiffRhythm-vae   — «other», текст не раскрыт;
+#   OpenMuQ/MuQ-MuLan-large   — CC-BY-NC-4.0, то есть НЕКОММЕРЧЕСКАЯ.
+# MuQ не опция: `prepare_model()` грузит её безусловно — именно она превращает текстовое описание
+# стиля в вектор, из которого рождается музыка. Без неё движок не работает вовсе.
+# Значит в образе лежит некоммерческий компонент. Решение принято владелицей осознанно; наша
+# обязанность — держать это записанным здесь, в README сервиса и в ответе движка.
+#
+# ЧТО ЗАКРЫВАЕТ: инструментал — а это шесть музыкальных видов из семи (подложка, рингтон,
+# аудиологотип, эмбиенс, минус, джингл). Песню на украинском НЕ закрывает: движок отказывается
+# ещё до генерации, «Unknown language: other» — он знает английский и китайский.
+RUN apt-get update && apt-get install -y --no-install-recommends espeak-ng \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv --copies /opt/diffrhythm-venv \
+ && /opt/diffrhythm-venv/bin/pip install --no-cache-dir --upgrade pip "setuptools<81" wheel \
+ && echo "DIFFRHYTHM: окружение готово"
+
+ARG DIFFRHYTHM_CODE=main
+RUN git clone -q https://github.com/ASLP-lab/DiffRhythm.git /opt/diffrhythm \
+ && rm -rf /opt/diffrhythm/.git \
+ && /opt/diffrhythm-venv/bin/pip install --no-cache-dir -r /opt/diffrhythm/requirements.txt \
+ || echo "!! DIFFRHYTHM: зависимости не встали"
+
+# torch ПОД BLACKWELL: их requirements тянут пару под cu124, но ферме выдают RTX PRO 6000
+# (sm_120), а ядер под неё нет до CUDA 12.8. Ставим поверх — иначе движок уйдёт на процессор,
+# как это уже было с речью и стоило нам вчетверо.
+RUN /opt/diffrhythm-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
       --index-url https://download.pytorch.org/whl/cu128 \
- || echo "!! HEARTMULA: torch не встал"
+ || echo "!! DIFFRHYTHM: torch под Blackwell не встал"
 
-ARG HEARTLIB_CODE=3783bdb8441f2c298b1e64c8651173aac200361c
-RUN git clone -q https://github.com/HeartMuLa/heartlib.git /opt/heartlib \
- && cd /opt/heartlib && git checkout -q ${HEARTLIB_CODE} && rm -rf /opt/heartlib/.git \
- && /opt/heartmula-venv/bin/pip install --no-cache-dir -e /opt/heartlib \
- || echo "!! HEARTMULA: код не встал"
+# ВЕСА. Движок кладёт их в ./pretrained ОТНОСИТЕЛЬНО ТЕКУЩЕГО КАТАЛОГА — та же ловушка, что была
+# с tts_uk. Поэтому греем строго из /opt/diffrhythm, и работник потом запускается оттуда же.
+# Вариант `-full` (ещё 2.2 ГБ) не берём: он нужен для дорожек длиннее полутора минут, а подложки
+# и джинглы короче.
+RUN cd /opt/diffrhythm && /opt/diffrhythm-venv/bin/python -c "\
+from huggingface_hub import hf_hub_download as f;\
+from muq import MuQMuLan;\
+print('cfm:', f(repo_id='ASLP-lab/DiffRhythm-1_2', filename='cfm_model.pt', cache_dir='./pretrained'));\
+print('vae:', f(repo_id='ASLP-lab/DiffRhythm-vae', filename='vae_model.pt', cache_dir='./pretrained'));\
+MuQMuLan.from_pretrained('OpenMuQ/MuQ-MuLan-large', cache_dir='./pretrained');\
+print('muq: на месте (ВНИМАНИЕ: CC-BY-NC, некоммерческая)')" \
+ || echo "!! DIFFRHYTHM: веса не легли в образ"
 
-# Веса ТРЕМЯ репозиториями — так их раскладывает сам автор, и путь жёстко зашит в его скрипт.
-ENV HF_HUB_DISABLE_XET=1
-RUN /opt/heartmula-venv/bin/python -c "\
-from huggingface_hub import snapshot_download as d;\
-print('gen  :', d('HeartMuLa/HeartMuLaGen', local_dir='/opt/audio-models/heartmula'));\
-print('mula :', d('HeartMuLa/HeartMuLa-oss-3B-happy-new-year', local_dir='/opt/audio-models/heartmula/HeartMuLa-oss-3B'));\
-print('codec:', d('HeartMuLa/HeartCodec-oss-20260123', local_dir='/opt/audio-models/heartmula/HeartCodec-oss'))" \
- || echo "!! HEARTMULA: веса не легли в образ"
-
-# ВОРОТА: движок обязан импортироваться в самом образе. Проверяем суть, а не версию пакета —
-# на версии мы уже роняли сборку зря, а «зелёный» образ, который не умеет играть, ещё хуже.
-RUN /opt/heartmula-venv/bin/python -c "\
-import heartlib; print('HEARTMULA: код импортируется в образе');\
-import os; p='/opt/audio-models/heartmula';\
-assert os.path.isdir(p+'/HeartMuLa-oss-3B'), 'нет весов модели';\
-assert os.path.isdir(p+'/HeartCodec-oss'), 'нет весов кодека';\
-print('HEARTMULA: веса на месте — ворота пройдены')" \
- || (echo "!! ВОРОТА: HeartMuLa не собрана — образ НЕ выпускаем" && exit 1)
+# ВОРОТА: движок обязан импортироваться и найти свои веса в самом образе.
+RUN cd /opt/diffrhythm && /opt/diffrhythm-venv/bin/python -c "\
+import sys, os; sys.path.insert(0, '/opt/diffrhythm');\
+import muq, torch;\
+assert os.path.isdir('/opt/diffrhythm/pretrained'), 'нет папки весов';\
+n=sum(len(f) for _,_,f in os.walk('/opt/diffrhythm/pretrained'));\
+assert n > 3, 'весов подозрительно мало: %d файлов' % n;\
+print('DIFFRHYTHM: код и веса на месте (%d файлов) — ворота пройдены' % n)" \
+ || (echo "!! ВОРОТА: DiffRhythm не собрана — образ НЕ выпускаем" && exit 1)

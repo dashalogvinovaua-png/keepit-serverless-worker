@@ -407,8 +407,62 @@ def run_heartmula(job):
     return data, 44100
 
 
+DIFFRHYTHM_DIR = "/opt/diffrhythm"
+
+
+def run_diffrhythm(job):
+    """DiffRhythm: музыка — инструментал или песня. Веса 6.1 ГБ, поэтому влезает в образ.
+
+    ⚠️ ПРАВА НЕОДНОРОДНЫЕ, и движок сообщает об этом сам, в каждом ответе. Код Apache 2.0, но
+    обязательный `OpenMuQ/MuQ-MuLan-large` — CC-BY-NC-4.0, то есть НЕКОММЕРЧЕСКАЯ. Без неё
+    движок не работает: именно она превращает описание стиля в вектор. Решение поставить принято
+    владелицей осознанно, а наше дело — чтобы это не потерялось между людьми и месяцами.
+
+    Инструментал — пустой lrc: шесть музыкальных видов из семи вокала не требуют.
+    Песню на украинском движок НЕ СДЕЛАЕТ: он отказывается ещё до генерации, «Unknown language».
+
+    Вход: {"engine":"diffrhythm", "tags":"стиль словами", "lyrics":"[00:00.00]строка…"|None,
+           "durationSec":95}
+    """
+    import subprocess
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="dr-")
+    lrc = os.path.join(tmp, "song.lrc")
+    # Без слов — инструментал. С ними нужен формат с метками времени: так устроен их разбор.
+    open(lrc, "w").write((job.get("lyrics") or "").strip() + "\n")
+    out = os.path.join(tmp, "out")
+    tags = (job.get("tags") or "calm instrumental background, soft piano, no vocals").strip()
+    length = int(float(job.get("durationSec") or 95))
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = DIFFRHYTHM_DIR + ":" + env.get("PYTHONPATH", "")
+    p = subprocess.run(
+        ["/opt/diffrhythm-venv/bin/python", "infer/infer.py",
+         "--lrc-path", lrc, "--ref-prompt", tags,
+         "--audio-length", str(length), "--output-dir", out,
+         "--chunked", "--batch-infer-num", "1"],
+        cwd=DIFFRHYTHM_DIR, capture_output=True, text=True, env=env,
+        timeout=int(job.get("timeout", 1200)))
+    made = None
+    for root, _d, files in os.walk(out):
+        for f in files:
+            if f.endswith((".wav", ".mp3")):
+                made = os.path.join(root, f)
+                break
+    if not made:
+        tail = (p.stderr or p.stdout or "")[-400:]
+        if "Unknown language" in tail:
+            raise RuntimeError("движок не знает этого языка для текста песни — он умеет "
+                               "английский и китайский. Инструментал сделать может.")
+        raise RuntimeError("DiffRhythm не отдала файл: %s" % tail)
+    _cache["diffrhythm_license"] = ("код Apache 2.0, но обязательный MuQ-MuLan — CC-BY-NC "
+                                    "(некоммерческая)")
+    return open(made, "rb").read(), 44100
+
+
 ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk, "higgs": run_higgs,
-           "cosy3": run_cosy3, "heartmula": run_heartmula}
+           "cosy3": run_cosy3, "heartmula": run_heartmula, "diffrhythm": run_diffrhythm}
 
 
 def _one(job, engine, fn, started):
@@ -423,6 +477,7 @@ def _one(job, engine, fn, started):
             "weights_at": os.environ.get("HF_HOME"),
             "seconds": round(len(data) / (sr * 2), 2),
             "took": round(time.time() - started, 1),
+            "licenseNote": _cache.get("diffrhythm_license") if engine == "diffrhythm" else None,
             "audio": base64.b64encode(data).decode(),
         }
     except Exception as e:  # noqa: BLE001
@@ -497,7 +552,7 @@ def main():
             piece = dict(common)
             piece.update(item if isinstance(item, dict) else {})
             t0 = time.time()
-            if engine not in ("heartmula",) and not (piece.get("text") or "").strip():
+            if engine not in ("heartmula", "diffrhythm") and not (piece.get("text") or "").strip():
                 out.append({"ok": False, "error": "пустой текст", "id": piece.get("id")})
                 continue
             res = _one(piece, engine, fn, t0)
@@ -515,7 +570,7 @@ def main():
         return
     # Музыке текст не обязателен: инструментал — это и есть отсутствие слов, а шесть музыкальных
     # видов из семи (подложка, рингтон, аудиологотип, эмбиенс, минус, джингл) вокала не требуют.
-    if engine not in ("heartmula",) and not (job.get("text") or "").strip():
+    if engine not in ("heartmula", "diffrhythm") and not (job.get("text") or "").strip():
         print(json.dumps({"ok": False, "error": "пустой текст"}))
         return
     res = _one(job, engine, fn, started)
