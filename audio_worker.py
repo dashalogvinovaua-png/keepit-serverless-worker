@@ -290,7 +290,75 @@ def run_higgs(job):
     return torch.from_numpy(out.audio), out.sampling_rate
 
 
-ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk, "higgs": run_higgs}
+COSY3_PLACES = ("/opt/audio-models/cosy3", "/runpod-volume/cosy3")
+
+
+def run_cosy3(job):
+    """CosyVoice 3 (Apache 2.0): девять языков, РУССКИЙ РОДНОЙ.
+
+    Живёт в своём окружении /opt/cosy3-venv — у него свой torch и свой transformers, и с
+    соседями по образу он несовместим. Handler зовёт его отдельным интерпретатором.
+
+    ВЫЗОВЫ ПРОВЕРЕНЫ РУКАМИ НА ПОДЕ, и они НЕ такие, как у CosyVoice 2:
+      * тройка ТРЕБУЕТ инструкцию, оканчивающуюся на `<|endofprompt|>`. Без неё движок падает
+        на своей же проверке: «<|endofprompt|> not detected in text or prompt_text»;
+      * язык задаётся инструкцией («Please speak in Russian.»), а не меткой вида `<|ru|>`;
+      * образец голоса ДОЛЬШЕ ТРИДЦАТИ СЕКУНД не принимается вовсе: «do not support extract
+        speech token for audio longer than 30s». Наш общий образец обрезан до 24.5 с по паузе
+        между предложениями — чтобы расшифровка совпадала со звуком слово в слово.
+
+    Языки, которых у модели нет (украинский — его не заявляет ни одна открытая модель), идут
+    клоном: пара «расшифровка образца → сам образец», дальше наш текст.
+    """
+    import sys
+    for p in ("/opt/cosyvoice", "/opt/cosyvoice/third_party/Matcha-TTS"):
+        if p not in sys.path:
+            sys.path.append(p)
+    from cosyvoice.cli.cosyvoice import AutoModel
+    import torch
+
+    model = _cache.get("cosy3")
+    if model is None:
+        where = next((p for p in COSY3_PLACES if os.path.isdir(p) and os.listdir(p)), None)
+        if not where:
+            raise RuntimeError("весов CosyVoice 3 нет ни в образе (%s), ни на томе (%s)" % COSY3_PLACES)
+        model = AutoModel(model_dir=where)
+        _cache["cosy3"] = model
+
+    ref = None
+    if job.get("ref_audio"):
+        ref = "/tmp/cosy3_ref.wav"
+        with open(ref, "wb") as f:
+            f.write(base64.b64decode(job["ref_audio"]))
+
+    system = "You are a helpful assistant."
+    lang = (job.get("language") or "").lower()
+    # Родные языки модели: их называем инструкцией, и голос берётся с образца, а язык — её
+    # собственный. Для остальных (украинский) — клон по расшифровке.
+    NATIVE = {"ru": "Russian", "en": "English", "zh": "Chinese", "ja": "Japanese",
+              "ko": "Korean", "de": "German", "es": "Spanish", "fr": "French", "it": "Italian"}
+    if not ref:
+        raise RuntimeError("CosyVoice 3 без образца голоса не работает: своего голоса у модели нет")
+
+    if lang in NATIVE:
+        instruct = "%s Please speak in %s.<|endofprompt|>" % (system, NATIVE[lang])
+        gen = model.inference_instruct2(job["text"], instruct, ref, stream=False)
+    else:
+        ref_text = (job.get("ref_text") or "").strip()
+        if not ref_text:
+            raise RuntimeError("для «%s» нужен клон, а значит и расшифровка образца (ref_text)" % lang)
+        gen = model.inference_zero_shot(job["text"], system + "<|endofprompt|>" + ref_text,
+                                        ref, stream=False)
+
+    chunks = [j["tts_speech"] for j in gen]
+    if not chunks:
+        raise RuntimeError("CosyVoice 3 не отдал ни одного куска звука")
+    wave = torch.cat(chunks, dim=1) if len(chunks) > 1 else chunks[0]
+    _cache["cosy3_chunks"] = len(chunks)
+    return wave, model.sample_rate
+
+
+ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk, "higgs": run_higgs, "cosy3": run_cosy3}
 
 
 def _one(job, engine, fn, started):

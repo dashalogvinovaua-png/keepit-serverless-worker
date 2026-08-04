@@ -207,6 +207,64 @@ print('HIGGS: процессор whisper в образе')" \
 RUN /opt/higgs-venv/bin/python -c "import importlib, sys; [sys.stdout.write('HIGGS: %s %s\n' % (m, 'есть' if importlib.util.find_spec(m) else 'НЕТ')) for m in ('torch','torchaudio','transformers','boson_multimodal','librosa','vector_quantize_pytorch')]" || true
 RUN echo "AUDIO: размер того, что в образе:" && du -sh /opt/audio-models 2>/dev/null || echo "AUDIO: весов в образе нет"
 
+# ── COSYVOICE 3 — ПОБЕДИТЕЛЬ ОТБОРА, ЕСЛИ ВЛАДЕЛИЦА ЕГО ПРИМЕТ ───────────────
+# ЗАЧЕМ ИМЕННО ОН. Из четырёх проб это единственная модель с РОДНЫМ русским (девять языков,
+# русский в списке, Apache 2.0 — проверено по карточке). Разница слышна и видна числом: у неё
+# русский идёт 12.7 знака в секунду, как у живого человека, а у CosyVoice 2 выходило 26.4 —
+# слова просто не произносились, и владелица отвергла его с первого прослушивания.
+# Украинского не заявляет НИ ОДНА открытая модель, поэтому украинский здесь — только клон
+# по образцу (data/audio/ref/uk-voice-25s.wav), и это свойство рынка, а не нашей сборки.
+#
+# ВСЁ НИЖЕ ПРОВЕРЕНО РУКАМИ НА ПОДЕ, а не выведено из документации. Три ловушки, каждая из
+# которых иначе стоила бы отдельной тридцатиминутной сборки:
+#   1. `openai-whisper` из их requirements прибит к версии, которая НЕ СОБИРАЕТСЯ на python 3.11
+#      («Getting requirements to build wheel did not run successfully») — ставим свежую отдельно;
+#   2. CosyVoice пинит torch 2.3.1, а его же transformers 4.51 требует 2.4+ и падает на
+#      `torch.library.register_fake` — возвращаем пару 2.4.1 последним шагом;
+#   3. пакет ставится ДЕРЕВОМ ИСХОДНИКОВ с подмодулем Matcha-TTS: сам автор кладёт его в sys.path,
+#      а без подмодуля движок не заводится вовсе.
+RUN python3 -m venv --copies /opt/cosy3-venv \
+ && /opt/cosy3-venv/bin/pip install --no-cache-dir --upgrade pip \
+ && echo "COSY3: отдельное окружение готово"
+
+ARG COSY3_CODE=074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc
+RUN git clone --recursive -q https://github.com/FunAudioLLM/CosyVoice.git /opt/cosyvoice \
+ && cd /opt/cosyvoice && git checkout -q ${COSY3_CODE} && git submodule update --init --recursive -q \
+ && rm -rf /opt/cosyvoice/.git \
+ && echo "COSY3: код и подмодуль Matcha-TTS на месте"
+
+# Тяжёлое и ненужное для счёта выкидываем: tensorrt, deepspeed, gradio, tensorboard и веб-морда
+# нужны обучению и демо, а нам — только синтез. Это и место в образе, и минуты сборки.
+RUN cd /opt/cosyvoice \
+ && grep -vE "tensorrt|deepspeed|gradio|tensorboard|fastapi|uvicorn|grpcio|openai-whisper" requirements.txt > /tmp/req.txt \
+ && /opt/cosy3-venv/bin/pip install --no-cache-dir openai-whisper \
+ && /opt/cosy3-venv/bin/pip install --no-cache-dir -r /tmp/req.txt \
+ && /opt/cosy3-venv/bin/pip install --no-cache-dir torch==2.4.1 torchaudio==2.4.1 \
+      --index-url https://download.pytorch.org/whl/cu124 \
+ && echo /opt/cosyvoice > "$(/opt/cosy3-venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/cosyvoice.pth" \
+ && echo /opt/cosyvoice/third_party/Matcha-TTS >> "$(/opt/cosy3-venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/cosyvoice.pth" \
+ || echo "!! COSY3: зависимости не встали"
+
+# Веса. ~10 ГБ — это МНОГО при тридцатиминутном пределе сборки. Базовая сборка сейчас укладывается
+# в семь минут, поэтому запас есть, но он не бесконечен: если сборка начнёт падать по таймауту,
+# веса переезжают на сетевой том, а этот шаг убирается (работник умеет искать их в обоих местах).
+ENV HF_HUB_DISABLE_XET=1
+RUN /opt/cosy3-venv/bin/python -c "\
+from huggingface_hub import snapshot_download;\
+p=snapshot_download('FunAudioLLM/Fun-CosyVoice3-0.5B-2512', local_dir='/opt/audio-models/cosy3');\
+print('COSY3: веса в образе:', p)" \
+ || echo "!! COSY3: веса не легли в образ"
+
+# ЕЩЁ ОДНА СПРЯТАННАЯ ЗАВИСИМОСТЬ, как hubert у Higgs: нормализатор текста `wetext` тянет свои
+# ресурсы с modelscope В МОМЕНТ ПЕРВОЙ ЗАГРУЗКИ МОДЕЛИ. На поде это было видно в логе. Греем
+# заранее, иначе первый холодный старт у владелицы полезет в чужую сеть за файлами.
+RUN /opt/cosy3-venv/bin/python -c "\
+from modelscope import snapshot_download;\
+print('COSY3: ресурсы wetext:', snapshot_download('pengzhendong/wetext'))" \
+ || echo "?? COSY3: ресурсы wetext не прогрелись — доберёт в работе"
+
+RUN /opt/cosy3-venv/bin/python -c "import importlib, sys; [sys.stdout.write('COSY3: %s %s\n' % (m, 'есть' if importlib.util.find_spec(m) else 'НЕТ')) for m in ('torch','torchaudio','transformers','cosyvoice','matcha')]" || true
+
 # Работник звука: его зовёт handler подпроцессом.
 COPY audio_worker.py /opt/audio_worker.py
 

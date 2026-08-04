@@ -576,10 +576,11 @@ AUDIO_WORKER = "/opt/audio_worker.py"
 # (берёт из него внутренности llama, которых после 4.47 уже нет), а Chatterbox рядом требует 5.2.
 # В одном окружении выживет только один, и это стоило бы нам рабочего Chatterbox — основы, с
 # которой мы сравниваем новые движки. Работник звука один и тот же: импорты у него внутри функций.
-ENGINE_PY = {"higgs": "/opt/higgs-venv/bin/python"}
+ENGINE_PY = {"higgs": "/opt/higgs-venv/bin/python",
+             "cosy3": "/opt/cosy3-venv/bin/python"}
 # Сколько ждём ответа. Higgs — модель на три миллиарда весов, и если карта не примет наши ядра
 # CUDA, считать придётся на процессоре: полчаса на тридцать секунд речи там не редкость.
-ENGINE_TIMEOUT = {"higgs": 1800}
+ENGINE_TIMEOUT = {"higgs": 1800, "cosy3": 900}
 
 
 def run_tts(spec):
