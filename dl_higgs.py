@@ -15,8 +15,13 @@
 #
 # И вторая ловушка: токенизатор звука тянет ЕЩЁ ДВЕ модели по имени, внутри себя —
 # `bosonai/hubert_base` (смысловая часть) и процессор `openai/whisper-large-v3-turbo`. В коде
-# они не видны, их находишь только чтением. Если их не прогреть здесь, в работе они окажутся
-# нужны при закрытой сети, и движок откажет уже у владелицы.
+# они не видны, их находишь только чтением. Они маленькие и лежат ПРЯМО В ОБРАЗЕ (см. Dockerfile),
+# поэтому здесь их нет: этот файл занимается только двумя тяжёлыми репозиториями.
+#
+# ГДЕ ЗАПУСКАЮТ. В образ веса не помещаются — сборка на RunPod обрывается на тридцатой минуте.
+# Поэтому скрипт гоняют туда, где место есть, задав HIGGS_DIR:
+#   на поде с примонтированным сетевым томом:  HIGGS_DIR=/workspace/higgs python dl_higgs.py
+#   на воркере, если на томе освободится место: HIGGS_DIR=/runpod-volume/higgs
 import os
 import sys
 
@@ -55,13 +60,7 @@ def main():
         print("!! HIGGS: токенизатор приехал не в том виде, нет файлов:", missing)
         sys.exit(1)
 
-    # Прогрев спрятанных зависимостей: их качает сам токенизатор, по имени, уже в работе.
-    from transformers import AutoModel, AutoProcessor
-
-    AutoModel.from_pretrained("bosonai/hubert_base", trust_remote_code=True)
-    print("HIGGS: смысловая модель bosonai/hubert_base в кэше образа")
-    AutoProcessor.from_pretrained("openai/whisper-large-v3-turbo")
-    print("HIGGS: процессор whisper-large-v3-turbo в кэше образа")
+    print("HIGGS: готово, всё лежит в", HIGGS_DIR)
 
 
 if __name__ == "__main__":

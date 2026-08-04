@@ -173,8 +173,24 @@ def run_ttsuk(job):
     return wave, 44100
 
 
-HIGGS_MODEL = "/opt/audio-models/higgs/model"
-HIGGS_TOKENIZER = "/opt/audio-models/higgs/tokenizer"
+# ГДЕ ЛЕЖАТ ВЕСА HIGGS. В образе их нет и быть не может: 12,8 ГБ не переживают тридцатиминутный
+# предел сборки на RunPod. Ищем по порядку — сетевой том, потом образ (вдруг когда-нибудь влезут).
+# Пути проверяем ДЕЛОМ, по наличию model.pth: код v2 читает именно его, и без него движок падает
+# уже после загрузки одиннадцати гигабайт, то есть за наши деньги.
+HIGGS_PLACES = ("/runpod-volume/higgs", "/opt/audio-models/higgs")
+
+
+def _higgs_paths():
+    for base in HIGGS_PLACES:
+        model, tok = os.path.join(base, "model"), os.path.join(base, "tokenizer")
+        if os.path.isdir(model) and os.path.exists(os.path.join(tok, "model.pth")):
+            return model, tok
+    places = ", ".join(HIGGS_PLACES)
+    raise RuntimeError(
+        "весов Higgs нет ни в одном из мест (%s). В образ они не влезают (предел сборки 30 минут), "
+        "в работе их не скачать (диск контейнера 5 ГБ, сетевой том на 150 ГБ занят моделями видео). "
+        "Их кладут на том с пода скриптом dl_higgs.py — сначала на томе нужно освободить место." % places
+    )
 
 
 def run_higgs(job):
@@ -195,9 +211,10 @@ def run_higgs(job):
 
     eng = _cache.get("higgs")
     if eng is None:
+        model_dir, tok_dir = _higgs_paths()
         dev = "cuda" if (os.environ.get("FORCE_CPU") != "1" and torch.cuda.is_available()) else "cpu"
         eng = HiggsAudioServeEngine(
-            HIGGS_MODEL, HIGGS_TOKENIZER, device=dev,
+            model_dir, tok_dir, device=dev,
             # На процессоре половинная точность считается медленно и местами не считается вовсе.
             torch_dtype=torch.bfloat16 if dev == "cuda" else torch.float32,
         )
