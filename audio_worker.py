@@ -71,7 +71,10 @@ _vol_ok, _free = _writable(VOLUME_CACHE)
 _local_ok, _local_free = _writable(LOCAL_CACHE)
 if os.path.isdir(IMAGE_CACHE) and os.listdir(IMAGE_CACHE):
     _where = IMAGE_CACHE
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")     # веса в образе, в сеть ходить незачем
+    # РАНЬШЕ ЗДЕСЬ ЗАКРЫВАЛИ СЕТЬ (HF_HUB_OFFLINE=1): считалось, что все веса приезжают в образе.
+    # Теперь это неверно и вредно: тяжёлые веса в образ не влезают (предел сборки тридцать минут),
+    # и движку разрешено добрать их в работе. В образе лежит только мелочь, она и так найдётся
+    # в кэше, а закрытая сеть просто убила бы докачку.
 elif _vol_ok:
     _where = VOLUME_CACHE
 elif _local_ok:
@@ -177,20 +180,52 @@ def run_ttsuk(job):
 # предел сборки на RunPod. Ищем по порядку — сетевой том, потом образ (вдруг когда-нибудь влезут).
 # Пути проверяем ДЕЛОМ, по наличию model.pth: код v2 читает именно его, и без него движок падает
 # уже после загрузки одиннадцати гигабайт, то есть за наши деньги.
-HIGGS_PLACES = ("/runpod-volume/higgs", "/opt/audio-models/higgs")
+HIGGS_PLACES = ("/runpod-volume/higgs", "/opt/audio-models/higgs", LOCAL_CACHE + "/higgs")
+# Ревизии ПРИБИТЫ к эпохе v2 — те же, что в dl_higgs.py, и по той же причине: карточки перевели
+# на формат v3, где у токенизатора вместо model.pth лежит model.safetensors, а код v2 читает
+# именно model.pth. Меняешь здесь — меняй и там, иначе движок молча возьмёт разные веса.
+HIGGS_MODEL_REPO = "bosonai/higgs-tts-2-3b-base"
+HIGGS_MODEL_REV = "10840182ca4ad5d9d9113b60b9bb3c1ef1ba3f84"
+HIGGS_TOK_REPO = "bosonai/higgs-audio-v2-tokenizer"
+HIGGS_TOK_REV = "9d4988fbd4ad07b4cac3a5fa462741a41810dbec"
 
 
 def _higgs_paths():
+    """Найти веса Higgs, а если их нигде нет — добрать туда, где реально пишется.
+
+    В образ 12,8 ГБ не кладём: сборка на RunPod обрывается на тридцатой минуте. Поэтому веса
+    либо уже лежат на томе (положили заранее), либо приезжают сейчас — один раз на холодный
+    старт. Проверяем НАЛИЧИЕМ model.pth: код v2 читает именно его, и без него движок падает
+    после загрузки одиннадцати гигабайт, то есть за наши деньги.
+    """
     for base in HIGGS_PLACES:
         model, tok = os.path.join(base, "model"), os.path.join(base, "tokenizer")
         if os.path.isdir(model) and os.path.exists(os.path.join(tok, "model.pth")):
             return model, tok
-    places = ", ".join(HIGGS_PLACES)
-    raise RuntimeError(
-        "весов Higgs нет ни в одном из мест (%s). В образ они не влезают (предел сборки 30 минут), "
-        "в работе их не скачать (диск контейнера 5 ГБ, сетевой том на 150 ГБ занят моделями видео). "
-        "Их кладут на том с пода скриптом dl_higgs.py — сначала на томе нужно освободить место." % places
-    )
+
+    # Куда качать: сначала том — он переживает холодный старт, и платим один раз за всё время.
+    # Не вышло (он у нас на 150 ГБ и занят моделями видео) — диск контейнера: тогда веса едут
+    # заново на каждый холодный старт, дороже, но движок работает сегодня, а не после переезда.
+    from huggingface_hub import snapshot_download
+    where = None
+    for base, need in (("/runpod-volume/higgs", 14), (LOCAL_CACHE + "/higgs", 14)):
+        ok, _free_gb = _writable(os.path.dirname(base), need_gb=need)
+        if ok:
+            where = base
+            break
+    if where is None:
+        raise RuntimeError(
+            "весам Higgs некуда лечь: на сетевом томе (150 ГБ, занят моделями видео) и на диске "
+            "контейнера нет 14 свободных гигабайт. Либо освободить том, либо поднять "
+            "containerDiskInGb у шаблона воркера."
+        )
+    model = snapshot_download(HIGGS_MODEL_REPO, revision=HIGGS_MODEL_REV,
+                              local_dir=os.path.join(where, "model"),
+                              allow_patterns=["*.json", "*.safetensors"])
+    tok = snapshot_download(HIGGS_TOK_REPO, revision=HIGGS_TOK_REV,
+                            local_dir=os.path.join(where, "tokenizer"),
+                            allow_patterns=["config.json", "model.pth"])
+    return model, tok
 
 
 def run_higgs(job):
