@@ -395,6 +395,39 @@ def main():
         print(json.dumps({"ok": False, "error": "вход не разобрать: %s" % e}))
         return
 
+    # САМОПРОВЕРКА ЖЕЛЕЗА. Отвечает на один вопрос: почему движок ушёл считать на процессор.
+    # Ошибка «no kernel image is available for execution on the device» значит ровно одно —
+    # наш torch собран БЕЗ ядер под ту карту, что нам выдали. Проверять это надо не догадками,
+    # а двумя числами рядом: на что способна карта (capability) и под что собран torch
+    # (get_arch_list). Запрос идёт с тем же `engine`, поэтому попадает в НУЖНОЕ окружение —
+    # у каждого движка свой torch, и спрашивать надо именно его.
+    if job.get("selftest"):
+        out = {"ok": True, "engine": job.get("engine")}
+        try:
+            import torch
+            ok = torch.cuda.is_available()
+            out["selftest"] = {
+                "torch": torch.__version__,
+                "собран_под_cuda": torch.version.cuda,
+                "карта_видна": ok,
+                "карта": torch.cuda.get_device_name(0) if ok else None,
+                "карта_умеет": list(torch.cuda.get_device_capability(0)) if ok else None,
+                "torch_собран_под": list(torch.cuda.get_arch_list()) if hasattr(torch.cuda, "get_arch_list") else None,
+                "forced_cpu": os.environ.get("FORCE_CPU") == "1",
+            }
+            # Проба делом: если ядер под карту нет, падает именно здесь и именно с этой ошибкой.
+            if ok:
+                try:
+                    torch.zeros(8, device="cuda").mul_(2).sum().item()
+                    out["selftest"]["счёт_на_карте"] = "проходит"
+                except Exception as e:  # noqa: BLE001
+                    out["selftest"]["счёт_на_карте"] = "НЕ проходит: %s" % str(e)[:200]
+        except Exception as e:  # noqa: BLE001
+            out["ok"] = False
+            out["error"] = str(e)[:200]
+        print(json.dumps(out, ensure_ascii=False))
+        return
+
     # НЕСКОЛЬКО ДОРОЖЕК ЗА ОДИН ЗАХОД. Handler поднимает нас НОВЫМ ПРОЦЕССОМ на каждый запрос,
     # а значит и веса читаются заново: у Higgs это 11,5 ГБ, минута-полторы работы карты, и мы
     # платим за неё как за генерацию. Три языка тремя запросами — это три таких загрузки на
