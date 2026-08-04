@@ -711,6 +711,16 @@ def diagnose_nodes(want_classes):
         higgs["готов"] = bool(higgs["venv"] and higgs["model"] and higgs["tokenizer_pth"]
                               and "false" not in (higgs.get("packages") or "false").lower())
         out["audio"]["higgs"] = higgs
+        # СКОЛЬКО НА ТОМЕ ЗАНЯТО НА САМОМ ДЕЛЕ. Свободное место мерить бесполезно: система
+        # показывает 89 тысяч гигабайт — это она видит хранилище под собой, а наша доля 150 ГБ.
+        # Поэтому меряем занятое: 150 минус занятое и есть то, что нам реально доступно. Именно
+        # этого числа не хватало, чтобы понять, влезут ли двенадцать гигабайт весов.
+        try:
+            r = subprocess.run(["du", "-sx", "--block-size=1G", "--max-depth=1", "/runpod-volume"],
+                               capture_output=True, text=True, timeout=180)
+            out["audio"]["том_занято_ГБ"] = [ln.split("\t") for ln in r.stdout.strip().splitlines()]
+        except Exception as e:  # noqa: BLE001
+            out["audio"]["том_занято_ГБ"] = "не смерить: %s" % str(e)[:120]
     except Exception as e:  # noqa: BLE001
         out["audio"]["error"] = str(e)[:200]
 
