@@ -85,15 +85,25 @@ _cache = {}
 
 
 def _wav_bytes(wave, sr):
-    """Тензор → wav в память. Файлы на диске воркера не нужны никому."""
+    """Тензор → wav в память. Файлы на диске воркера не нужны никому.
+
+    Пишем 16 битами, а не тем float32, что отдают движки. Причины две, обе практические:
+    файл выходит вдвое легче (а он едет к нам по сети в base64, где вес удваивается ещё раз),
+    и поле `seconds` наконец считается правильно — оно всегда делило на два байта на отсчёт,
+    то есть для float32 показывало вдвое больше, чем звучало на самом деле.
+    """
     import torch
     import torchaudio
     if not isinstance(wave, torch.Tensor):
         wave = torch.tensor(wave)
     if wave.dim() == 1:
         wave = wave.unsqueeze(0)
+    wave = wave.cpu()
+    if wave.is_floating_point():
+        # Обрезаем по краям диапазона: иначе редкий выброс за единицу превратится в щелчок.
+        wave = (wave.clamp(-1.0, 1.0) * 32767.0).to(torch.int16)
     buf = io.BytesIO()
-    torchaudio.save(buf, wave.cpu(), sr, format="wav")
+    torchaudio.save(buf, wave, sr, format="wav", encoding="PCM_S", bits_per_sample=16)
     return buf.getvalue()
 
 
@@ -231,35 +241,19 @@ def run_higgs(job):
 ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk, "higgs": run_higgs}
 
 
-def main():
-    started = time.time()
-    try:
-        job = json.load(sys.stdin)
-    except Exception as e:  # noqa: BLE001
-        print(json.dumps({"ok": False, "error": "вход не разобрать: %s" % e}))
-        return
-    engine = job.get("engine")
-    fn = ENGINES.get(engine)
-    if not fn:
-        print(json.dumps({"ok": False,
-                          "error": "нет такого движка: %s (есть: %s)" % (engine, ", ".join(ENGINES))}))
-        return
-    if not (job.get("text") or "").strip():
-        print(json.dumps({"ok": False, "error": "пустой текст"}))
-        return
+def _one(job, engine, fn, started):
+    """Одна дорожка: посчитать и завернуть в ответ. Ошибку объясняем словами, а не следом стека."""
     try:
         wave, sr = fn(job)
         data = _wav_bytes(wave, sr)
-        print(json.dumps({
+        return {
             "ok": True, "engine": engine, "sample_rate": sr,
             "device": "cpu" if os.environ.get("FORCE_CPU") == "1" else "gpu",
             "weights_at": os.environ.get("HF_HOME"),
-            "volume_free_gb": _free, "volume_writable": _vol_ok,
-            "container_free_gb": _local_free, "container_writable": _local_ok,
             "seconds": round(len(data) / (sr * 2), 2),
             "took": round(time.time() - started, 1),
             "audio": base64.b64encode(data).decode(),
-        }))
+        }
     except Exception as e:  # noqa: BLE001
         import traceback
         msg = str(e)
@@ -269,9 +263,61 @@ def main():
                    "веса должны приезжать внутри образа." % (
                        "пишется" if _vol_ok else "НЕ пишется", _free,
                        "пишется" if _local_ok else "НЕ пишется", _local_free))
-        print(json.dumps({"ok": False, "engine": engine,
-                          "error": msg[:400],
-                          "trace": traceback.format_exc().strip().splitlines()[-4:]}))
+        return {"ok": False, "engine": engine, "error": msg[:400],
+                "trace": traceback.format_exc().strip().splitlines()[-4:]}
+
+
+def main():
+    started = time.time()
+    try:
+        job = json.load(sys.stdin)
+    except Exception as e:  # noqa: BLE001
+        print(json.dumps({"ok": False, "error": "вход не разобрать: %s" % e}))
+        return
+
+    # НЕСКОЛЬКО ДОРОЖЕК ЗА ОДИН ЗАХОД. Handler поднимает нас НОВЫМ ПРОЦЕССОМ на каждый запрос,
+    # а значит и веса читаются заново: у Higgs это 11,5 ГБ, минута-полторы работы карты, и мы
+    # платим за неё как за генерацию. Три языка тремя запросами — это три таких загрузки на
+    # ровном месте. Со списком `items` модель поднимается один раз и читает все фразы подряд.
+    # Общее у списка — движок и всё, что задано в корне; своё у дорожки — текст, язык, образец.
+    if isinstance(job.get("items"), list):
+        engine = job.get("engine")
+        fn = ENGINES.get(engine)
+        if not fn:
+            print(json.dumps({"ok": False, "error": "нет такого движка: %s (есть: %s)"
+                                                    % (engine, ", ".join(ENGINES))}))
+            return
+        common = {k: v for k, v in job.items() if k != "items"}
+        out = []
+        for item in job["items"]:
+            piece = dict(common)
+            piece.update(item if isinstance(item, dict) else {})
+            t0 = time.time()
+            if not (piece.get("text") or "").strip():
+                out.append({"ok": False, "error": "пустой текст", "id": piece.get("id")})
+                continue
+            res = _one(piece, engine, fn, t0)
+            res["id"] = piece.get("id")
+            out.append(res)
+        print(json.dumps({"ok": any(r.get("ok") for r in out), "engine": engine,
+                          "items": out, "took": round(time.time() - started, 1)}))
+        return
+
+    engine = job.get("engine")
+    fn = ENGINES.get(engine)
+    if not fn:
+        print(json.dumps({"ok": False,
+                          "error": "нет такого движка: %s (есть: %s)" % (engine, ", ".join(ENGINES))}))
+        return
+    if not (job.get("text") or "").strip():
+        print(json.dumps({"ok": False, "error": "пустой текст"}))
+        return
+    res = _one(job, engine, fn, started)
+    # Где лежат веса и куда вообще можно писать — нужно только при разборе поломок, поэтому
+    # добавляем к одиночному ответу, а список этим не засоряем.
+    res.update({"volume_free_gb": _free, "volume_writable": _vol_ok,
+                "container_free_gb": _local_free, "container_writable": _local_ok})
+    print(json.dumps(res))
 
 
 if __name__ == "__main__":
