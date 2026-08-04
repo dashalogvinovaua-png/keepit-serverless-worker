@@ -223,8 +223,12 @@ RUN echo "AUDIO: размер того, что в образе:" && du -sh /opt/
 #      `torch.library.register_fake` — возвращаем пару 2.4.1 последним шагом;
 #   3. пакет ставится ДЕРЕВОМ ИСХОДНИКОВ с подмодулем Matcha-TTS: сам автор кладёт его в sys.path,
 #      а без подмодуля движок не заводится вовсе.
+# setuptools ставим ЯВНО: свежий venv его больше не кладёт, а `cosyvoice.flow.flow_matching`
+# импортирует `pkg_resources`, который живёт именно в нём. На поде это не всплыло — там код
+# работал на системном Python, где setuptools был. В чистом окружении движок падал на первой
+# же фразе: «No module named 'pkg_resources'». Поймано пробой голосом, а не диагнозом.
 RUN python3 -m venv --copies /opt/cosy3-venv \
- && /opt/cosy3-venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/cosy3-venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
  && echo "COSY3: отдельное окружение готово"
 
 ARG COSY3_CODE=074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc
