@@ -167,10 +167,23 @@ RUN /opt/higgs-venv/bin/pip install --no-cache-dir \
 # честном слове — в любой день его могут убрать. Ставим --no-deps: список зависимостей автора
 # тянет boto3, s3fs и descript-audio-codec, которые в нашем пути исполнения не нужны вовсе
 # (кодек внутри пакета свой, вложенный), а лишние пакеты — лишний риск сдвинуть torch.
+#
+# СТАВИМ ДЕРЕВОМ ИСХОДНИКОВ, А НЕ ПАКЕТОМ — и это не вкусовщина, это проверено отказом.
+# `pip install` из репозитория собирает пакет по setup.cfg с `packages = find:`, а find берёт
+# только те папки, где есть __init__.py. У автора его НЕТ ни в `serve/`, ни в `audio_processing/`,
+# ни внутри вложенного кодека — он запускает код прямо из корня репозитория, где такие папки
+# работают как namespace-пакеты. В итоге pip ставит обрубок: `import boson_multimodal` проходит,
+# а `boson_multimodal.serve` не находится, и узнаёшь ты об этом уже на прогоне.
+# Поэтому кладём репозиторий целиком и показываем его окружению файлом .pth.
 ARG HIGGS_CODE=05a145bb490501b534563bf51bf2f7aa2326b271
-RUN /opt/higgs-venv/bin/pip install --no-cache-dir --no-deps \
-      "git+https://github.com/boson-ai/higgs-audio.git@${HIGGS_CODE}" \
- && /opt/higgs-venv/bin/python -c "from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine; print('HIGGS: код v2 на месте')" \
+RUN git init /opt/higgs-audio \
+ && cd /opt/higgs-audio \
+ && git remote add origin https://github.com/boson-ai/higgs-audio.git \
+ && git fetch --depth 1 origin "${HIGGS_CODE}" \
+ && git checkout FETCH_HEAD \
+ && rm -rf /opt/higgs-audio/.git \
+ && echo /opt/higgs-audio > "$(/opt/higgs-venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/higgs-audio.pth" \
+ && /opt/higgs-venv/bin/python -c "from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine; print('HIGGS: код v2 на месте, serve виден')" \
  || echo "!! HIGGS: код не встал — проверь, не вырезали ли v2 из репозитория"
 
 # Сам скрипт весов кладём в образ, но НЕ ЗАПУСКАЕМ здесь: 12,8 ГБ не переживут тридцатиминутный
