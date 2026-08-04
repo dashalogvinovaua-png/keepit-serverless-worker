@@ -153,6 +153,56 @@ RUN mkdir -p /opt/audio-models/ttsuk && cd /opt/audio-models/ttsuk \
  || echo "!! веса tts_uk не легли в образ — движок попробует скачать их в работе"
 RUN echo "AUDIO: размер весов в образе:" && du -sh /opt/audio-models 2>/dev/null || echo "AUDIO: весов в образе нет"
 
+# ── HIGGS AUDIO 2 — В СВОЁМ ОТДЕЛЬНОМ ОКРУЖЕНИИ ─────────────────────────────
+# ПОЧЕМУ НЕ РЯДОМ С Chatterbox и tts_uk в /opt/audio-venv. Проверено по метаданным пакетов, а не
+# на глаз: chatterbox-tts 0.1.7 требует transformers==5.2.0 и torch==2.6.0, а код Higgs v2 берёт
+# из transformers внутренности llama и whisper (`LLAMA_ATTENTION_CLASSES` убран после 4.47) и
+# держится на transformers>=4.45,<4.47. Вместе они не встанут никогда: pip разрешит конфликт
+# сдвигом transformers — и мы потеряем рабочий Chatterbox. А он нужен целым: это ОСНОВА
+# СРАВНЕНИЯ, на нём и на tts_uk мы гоняем тот же текст, иначе сравнивать новый движок не с чем.
+# Тот же урок мы уже оплатили один раз, когда звук поставили в общее окружение ComfyUI.
+# Поэтому у Higgs свой интерпретатор, свой torch и свой transformers, а handler зовёт для него
+# другой python (см. ENGINE_PY в handler.py). Встретиться они не могут: разные процессы.
+RUN python3 -m venv --copies /opt/higgs-venv \
+ && /opt/higgs-venv/bin/pip install --no-cache-dir --upgrade pip \
+ && echo "HIGGS: отдельное окружение /opt/higgs-venv готово"
+
+# torch под transformers 4.46. В базовом образе Python 3.12 — колёса 2.5.1+cu124 для него есть.
+# Ступеньки вниз на случай, если версию уберут: лучше движок на процессоре, чем пустое место.
+RUN /opt/higgs-venv/bin/pip install --no-cache-dir torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
+ || /opt/higgs-venv/bin/pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124 \
+ || /opt/higgs-venv/bin/pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu124 \
+ || echo "!! HIGGS: torch не встал — движок не поедет, остальное не тронуто"
+
+# transformers ПРИБИТ к 4.46.3: это последняя версия, где ещё есть внутренности, на которые
+# опирается код v2. numpy держим ниже двойки — под ним собран весь этот слой.
+RUN /opt/higgs-venv/bin/pip install --no-cache-dir \
+      "transformers==4.46.3" "numpy<2" "accelerate>=0.26.0" \
+      librosa dacite pandas loguru vector_quantize_pytorch omegaconf pydantic \
+      json_repair langid jieba pydub click \
+ || echo "!! HIGGS: зависимости не встали"
+
+# Код Higgs v2 ПРИБИТ К КОММИТУ. В `main` репозиторий уже развёрнут на v3 (последний коммит так
+# и называется: «point README to Higgs Audio v3, archive v2 guide»), и код v2 там держится на
+# честном слове — в любой день его могут убрать. Ставим --no-deps: список зависимостей автора
+# тянет boto3, s3fs и descript-audio-codec, которые в нашем пути исполнения не нужны вовсе
+# (кодек внутри пакета свой, вложенный), а лишние пакеты — лишний риск сдвинуть torch.
+ARG HIGGS_CODE=05a145bb490501b534563bf51bf2f7aa2326b271
+RUN /opt/higgs-venv/bin/pip install --no-cache-dir --no-deps \
+      "git+https://github.com/boson-ai/higgs-audio.git@${HIGGS_CODE}" \
+ && /opt/higgs-venv/bin/python -c "from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine; print('HIGGS: код v2 на месте')" \
+ || echo "!! HIGGS: код не встал — проверь, не вырезали ли v2 из репозитория"
+
+# Веса и две спрятанные модели, которые тянет токенизатор. Подробности и ловушки — в самом файле.
+ENV HIGGS_DIR=/opt/audio-models/higgs
+COPY dl_higgs.py /opt/dl_higgs.py
+RUN /opt/higgs-venv/bin/python /opt/dl_higgs.py \
+ || echo "!! HIGGS: веса не легли в образ — в работе он их не докачает (на воркере квота на запись)"
+
+# Что доехало — видно здесь, а не выясняется на первой задаче за деньги.
+RUN /opt/higgs-venv/bin/python -c "import importlib, sys; [sys.stdout.write('HIGGS: %s %s\n' % (m, 'есть' if importlib.util.find_spec(m) else 'НЕТ')) for m in ('torch','torchaudio','transformers','boson_multimodal','librosa','vector_quantize_pytorch')]" || true
+RUN echo "HIGGS: размер весов:" && du -sh /opt/audio-models/higgs 2>/dev/null || echo "HIGGS: весов нет"
+
 # Работник звука: его зовёт handler подпроцессом.
 COPY audio_worker.py /opt/audio_worker.py
 

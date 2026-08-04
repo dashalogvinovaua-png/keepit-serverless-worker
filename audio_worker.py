@@ -163,7 +163,72 @@ def run_ttsuk(job):
     return wave, 44100
 
 
-ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk}
+HIGGS_MODEL = "/opt/audio-models/higgs/model"
+HIGGS_TOKENIZER = "/opt/audio-models/higgs/tokenizer"
+
+
+def run_higgs(job):
+    """Higgs Audio 2 (Boson AI, лицензия Boson Community на базе Meta Llama 3).
+
+    Живёт в ДРУГОМ окружении — /opt/higgs-venv: ему нужен transformers 4.46, а Chatterbox рядом
+    требует 5.2. Этот же файл запускается обоими интерпретаторами, потому что все импорты движков
+    сделаны внутри функций: чужой движок не импортируется и мешать не может.
+
+    Украинского и русского в родных языках модели НЕТ (заявлены en, zh, de, ko). Поэтому наши
+    языки берём КЛОНОМ: даём образец живой речи (`ref_audio`) вместе с его расшифровкой
+    (`ref_text`) — и модель продолжает говорить тем же голосом уже наш текст. Расшифровка
+    обязательна: без неё модель не знает, что именно звучит в образце, и клон разваливается.
+    """
+    from boson_multimodal.data_types import AudioContent, ChatMLSample, Message
+    from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine
+    import torch
+
+    eng = _cache.get("higgs")
+    if eng is None:
+        dev = "cuda" if (os.environ.get("FORCE_CPU") != "1" and torch.cuda.is_available()) else "cpu"
+        eng = HiggsAudioServeEngine(
+            HIGGS_MODEL, HIGGS_TOKENIZER, device=dev,
+            # На процессоре половинная точность считается медленно и местами не считается вовсе.
+            torch_dtype=torch.bfloat16 if dev == "cuda" else torch.float32,
+        )
+        _cache["higgs"] = eng
+
+    # Описание сцены — это то, чем модель задаёт манеру записи. «Тихая комната» держит её ближе
+    # к обычной речи, без студийного эха, — ровно то, что нам нужно для съёмки «на телефон».
+    scene = job.get("scene") or "Audio is recorded from a quiet room."
+    messages = [Message(
+        role="system",
+        content="Generate audio following instruction.\n\n<|scene_desc_start|>\n%s\n<|scene_desc_end|>" % scene,
+    )]
+    if job.get("ref_audio"):
+        # Клон голоса разговором: реплика человека — расшифровка образца, ответ модели — сам
+        # образец. Дальше идёт наш текст, и модель отвечает тем же голосом.
+        # audio_url='placeholder' — именно так движок берёт звук из raw_audio, а не читает файл
+        # с диска (на воркере писать некуда).
+        messages.append(Message(role="user", content=job.get("ref_text") or ""))
+        messages.append(Message(role="assistant",
+                                content=AudioContent(audio_url="placeholder", raw_audio=job["ref_audio"])))
+    messages.append(Message(role="user", content=job["text"]))
+
+    out = eng.generate(
+        chat_ml_sample=ChatMLSample(messages=messages),
+        # Тридцать секунд речи — это около 750 звуковых шагов; две тысячи с запасом хватает.
+        max_new_tokens=int(job.get("max_new_tokens", 2048)),
+        temperature=float(job.get("temperature", 0.3)),
+        top_p=float(job.get("top_p", 0.95)),
+        top_k=int(job.get("top_k", 50)),
+        stop_strings=["<|end_of_text|>", "<|eot_id|>"],
+        # Модель умеет ответить и текстом вместо звука — здесь это была бы пустая трата прогона.
+        force_audio_gen=True,
+        seed=job.get("seed"),
+    )
+    if out.audio is None:
+        raise RuntimeError("Higgs ответил текстом, а не звуком")
+    _cache["higgs_text"] = getattr(out, "generated_text", None)
+    return torch.from_numpy(out.audio), out.sampling_rate
+
+
+ENGINES = {"chatterbox": run_chatterbox, "ttsuk": run_ttsuk, "higgs": run_higgs}
 
 
 def main():

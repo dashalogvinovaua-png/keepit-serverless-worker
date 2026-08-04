@@ -572,23 +572,34 @@ def get_image_data(filename, subfolder, image_type):
 
 AUDIO_PY = "/opt/audio-venv/bin/python"
 AUDIO_WORKER = "/opt/audio_worker.py"
+# У КАЖДОГО ДВИЖКА СВОЙ ИНТЕРПРЕТАТОР, ЕСЛИ ИНАЧЕ НЕЛЬЗЯ. Higgs держится на transformers 4.46
+# (берёт из него внутренности llama, которых после 4.47 уже нет), а Chatterbox рядом требует 5.2.
+# В одном окружении выживет только один, и это стоило бы нам рабочего Chatterbox — основы, с
+# которой мы сравниваем новые движки. Работник звука один и тот же: импорты у него внутри функций.
+ENGINE_PY = {"higgs": "/opt/higgs-venv/bin/python"}
+# Сколько ждём ответа. Higgs — модель на три миллиарда весов, и если карта не примет наши ядра
+# CUDA, считать придётся на процессоре: полчаса на тридцать секунд речи там не редкость.
+ENGINE_TIMEOUT = {"higgs": 1800}
 
 
 def run_tts(spec):
     """Отдать задание речевому движку в его собственном окружении и вернуть звук."""
     import subprocess
 
-    if not os.path.exists(AUDIO_PY):
-        return {"error": "речевое окружение не установлено (/opt/audio-venv) — нужна пересборка образа"}
+    engine = spec.get("engine")
+    py = ENGINE_PY.get(engine, AUDIO_PY)
+    if not os.path.exists(py):
+        return {"error": "окружение движка «%s» не установлено (%s) — нужна пересборка образа"
+                         % (engine, py)}
     def call(force_cpu=False):
         env = dict(os.environ)
         if force_cpu:
             env["FORCE_CPU"] = "1"
         try:
             p = subprocess.run(
-                [AUDIO_PY, AUDIO_WORKER],
+                [py, AUDIO_WORKER],
                 input=json.dumps(spec), capture_output=True, text=True, env=env,
-                timeout=int(spec.get("timeout", 600)),
+                timeout=int(spec.get("timeout", ENGINE_TIMEOUT.get(engine, 600))),
             )
         except subprocess.TimeoutExpired:
             return {"error": "движок речи не уложился в отведённое время"}
@@ -684,6 +695,22 @@ def diagnose_nodes(want_classes):
                                 "('torch','torchaudio','chatterbox','tts_uk')}))"],
                                capture_output=True, text=True, timeout=120)
             out["audio"]["packages"] = r.stdout.strip() or r.stderr[-200:]
+        # Higgs стоит отдельно, и спросить его надо отдельно — иначе «звук есть» будет значить
+        # только Chatterbox, а на прогон Higgs мы узнаем правду уже за деньги.
+        higgs = {"venv": os.path.isdir("/opt/higgs-venv")}
+        for name, path in (("model", "/opt/audio-models/higgs/model"),
+                           ("tokenizer_pth", "/opt/audio-models/higgs/tokenizer/model.pth")):
+            higgs[name] = os.path.exists(path)
+        if higgs["venv"]:
+            r = subprocess.run(["/opt/higgs-venv/bin/python", "-c",
+                                "import importlib.util as u, json;"
+                                "print(json.dumps({m: bool(u.find_spec(m)) for m in "
+                                "('torch','torchaudio','transformers','boson_multimodal')}))"],
+                               capture_output=True, text=True, timeout=120)
+            higgs["packages"] = r.stdout.strip() or r.stderr[-200:]
+        higgs["готов"] = bool(higgs["venv"] and higgs["model"] and higgs["tokenizer_pth"]
+                              and "false" not in (higgs.get("packages") or "false").lower())
+        out["audio"]["higgs"] = higgs
     except Exception as e:  # noqa: BLE001
         out["audio"]["error"] = str(e)[:200]
 
