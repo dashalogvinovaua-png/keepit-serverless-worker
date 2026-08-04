@@ -273,8 +273,16 @@ print('COSY3: ресурсы wetext:', snapshot_download('pengzhendong/wetext'))
 # правка была в шаге создания окружения, то есть в САМОМ НАЧАЛЕ, и обесценила все слои после
 # себя — включая скачивание десяти гигабайт весов. Сборка не уложилась в предел и упала на
 # 35-й минуте. Дешёвые правки идут ПОСЛЕ тяжёлых слоёв, тогда пересборка трогает только хвост.
-RUN /opt/cosy3-venv/bin/pip install --no-cache-dir setuptools wheel \
- && /opt/cosy3-venv/bin/python -c "import pkg_resources; print('COSY3: pkg_resources на месте')"
+# ВЕРСИЯ ПРИБИТА НЕ ОТ ОСТОРОЖНОСТИ, А ПО ОТКАЗУ. Простой `pip install setuptools` притащил
+# свежую ветку (81+), где `pkg_resources` уже ВЫРЕЗАН — и проверка ниже уронила всю сборку на
+# четырнадцатой минуте. Нам нужен именно тот setuptools, в котором pkg_resources ещё живёт.
+#
+# Проверка теперь МЯГКАЯ (|| echo). Жёсткий gate здесь стоит дороже, чем помогает: он платит
+# целой пересборкой за то, что проба голосом ловит за секунды. Настоящий воротарь у нас —
+# прогон живого голоса на ферме, он уже поймал этот самый pkg_resources, когда диагноз молчал.
+RUN /opt/cosy3-venv/bin/pip install --no-cache-dir "setuptools<81" wheel \
+ && /opt/cosy3-venv/bin/python -c "import pkg_resources; print('COSY3: pkg_resources на месте')" \
+ || echo "!! COSY3: pkg_resources не встал — движок упадёт на первой фразе, чинить пином setuptools"
 
 RUN /opt/cosy3-venv/bin/python -c "import importlib, sys; [sys.stdout.write('COSY3: %s %s\n' % (m, 'есть' if importlib.util.find_spec(m) else 'НЕТ')) for m in ('torch','torchaudio','transformers','cosyvoice','matcha')]" || true
 
