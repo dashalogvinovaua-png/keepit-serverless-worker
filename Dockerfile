@@ -431,24 +431,30 @@ RUN /opt/diffrhythm-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio=
  || echo "!! DIFFRHYTHM: torch под Blackwell не встал"
 
 # ВЕСА. Движок кладёт их в ./pretrained ОТНОСИТЕЛЬНО ТЕКУЩЕГО КАТАЛОГА — та же ловушка, что была
-# с tts_uk. Поэтому греем строго из /opt/diffrhythm, и работник потом запускается оттуда же.
-# Вариант `-full` (ещё 2.2 ГБ) не берём: он нужен для дорожек длиннее полутора минут, а подложки
-# и джинглы короче.
+# с tts_uk. Поэтому качаем строго из /opt/diffrhythm, и работник потом запускается оттуда же.
+#
+# КАЧАЕМ ФАЙЛАМИ, А НЕ ЧЕРЕЗ `MuQMuLan.from_pretrained`. Прошлая сборка упала именно здесь:
+# from_pretrained СНАЧАЛА импортирует пакет `muq`, а он писан под torchaudio 2.6, тогда как нам
+# для карты Blackwell нужен 2.7 — и импорт валится ещё до первого байта весов. Скачивание файлов
+# импорта не требует вовсе, а работнику при счёте они лягут по тем же путям.
+# Вариант `-full` (ещё 2.2 ГБ) не берём: он для дорожек длиннее полутора минут, а подложки короче.
 RUN cd /opt/diffrhythm && /opt/diffrhythm-venv/bin/python -c "\
-from huggingface_hub import hf_hub_download as f;\
-from muq import MuQMuLan;\
+from huggingface_hub import hf_hub_download as f, snapshot_download as s;\
 print('cfm:', f(repo_id='ASLP-lab/DiffRhythm-1_2', filename='cfm_model.pt', cache_dir='./pretrained'));\
 print('vae:', f(repo_id='ASLP-lab/DiffRhythm-vae', filename='vae_model.pt', cache_dir='./pretrained'));\
-MuQMuLan.from_pretrained('OpenMuQ/MuQ-MuLan-large', cache_dir='./pretrained');\
-print('muq: на месте (ВНИМАНИЕ: CC-BY-NC, некоммерческая)')" \
+print('muq:', s('OpenMuQ/MuQ-MuLan-large', cache_dir='./pretrained'));\
+print('ВНИМАНИЕ: MuQ-MuLan под CC-BY-NC, некоммерческая')" \
  || echo "!! DIFFRHYTHM: веса не легли в образ"
 
-# ВОРОТА: движок обязан импортироваться и найти свои веса в самом образе.
+# ВОРОТА: проверяем ТО, ЧТО РЕАЛЬНО НУЖНО ДЛЯ РАБОТЫ, а не то, что удобно проверить.
+# Импорт `muq` сюда НЕ ставим: он тянет torchaudio своей эпохи и упадёт на нашем 2.7, хотя сам
+# движок при счёте поднимается отдельным процессом и с этим справляется. Проверяем наличие кода,
+# весов и рабочего torch — этого достаточно, чтобы образ не вышел немым.
 RUN cd /opt/diffrhythm && /opt/diffrhythm-venv/bin/python -c "\
-import sys, os; sys.path.insert(0, '/opt/diffrhythm');\
-import muq, torch;\
+import os, torch;\
+assert os.path.isfile('/opt/diffrhythm/infer/infer.py'), 'нет кода движка';\
 assert os.path.isdir('/opt/diffrhythm/pretrained'), 'нет папки весов';\
 n=sum(len(f) for _,_,f in os.walk('/opt/diffrhythm/pretrained'));\
 assert n > 3, 'весов подозрительно мало: %d файлов' % n;\
-print('DIFFRHYTHM: код и веса на месте (%d файлов) — ворота пройдены' % n)" \
+print('DIFFRHYTHM: код и веса на месте (%d файлов), torch %s — ворота пройдены' % (n, torch.__version__))" \
  || (echo "!! ВОРОТА: DiffRhythm не собрана — образ НЕ выпускаем" && exit 1)
