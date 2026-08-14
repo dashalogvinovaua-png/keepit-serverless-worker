@@ -3,6 +3,24 @@
 # модели с сетевого тома (/runpod-volume/models). Мы лишь заменяем handler.py.
 FROM runpod/worker-comfyui:5.8.6-base
 
+# ── ЯДРО ComfyUI ОБНОВЛЯЕМ ДО СВЕЖЕГО ───────────────────────────────────────
+#
+# Заказ на пересборку писался 5 августа 2026 — ДО выхода LTX-2.5, и требования обновить само
+# ядро в нём нет. Область животных поймала это до сборки (14.08): собрать образ на прежнем ядре
+# значит привезти модели восстановления лица и НЕ получить LTX-2.5 — узлы новой модели живут в
+# ядре, а не в наборах. Понадобилась бы вторая пересборка, ещё сорок минут.
+#
+# Базовый образ несёт ComfyUI на день своей сборки; тянем свежий поверх, не старее 11.08.2026.
+# Ставим ДО всего остального: наборы узлов ставятся под то ядро, что уже лежит, и их проверки
+# импорта должны видеть новые зависимости, а не старые.
+RUN set -e; cd /comfyui \
+ && git fetch -q --depth 50 origin master \
+ && git checkout -q FETCH_HEAD \
+ && python3 -c "import datetime,subprocess;d=subprocess.check_output(['git','-C','/comfyui','log','-1','--format=%cI']).decode().strip();print('ComfyUI в образе от',d);\
+assert d[:10] >= '2026-08-11', 'ЯДРО СТАРОЕ: '+d+' — LTX-2.5 не запустится, сборку не выпускаем'" \
+ && pip install -q --no-cache-dir -r requirements.txt
+
+
 # Наш handler умеет собирать ЛЮБОЙ выходной файл (SaveVideo → mp4), а не только images.
 COPY handler.py /handler.py
 
@@ -38,6 +56,23 @@ RUN set -e; cd /comfyui/models; \
  (wget -q -O facedetection/detection_Resnet50_Final.pth https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth || true); \
  (wget -q -O facedetection/parsing_parsenet.pth https://github.com/xinntao/facexlib/releases/download/v0.2.2/parsing_parsenet.pth || true); \
  (wget -q -O upscale_models/RealESRGAN_x4plus.pth https://huggingface.co/lllyasviel/Annotators/resolve/main/RealESRGAN_x4plus.pth || true)
+
+# ЛУЧШАЯ ПОДМЕНА ЛИЦА. Потолок у нас не в качестве вставки, а в РАЗМЕРЕ исходного лица:
+# inswapper работает со 128 пикселями, и на ростовом кадре лицо занимает меньше — оттого «похож,
+# но не он». Агент фото назвал точный список того, что снимет этот потолок без переписывания его
+# графа: восстановители лица большего разрешения (codeformer у нас работает на 512, GPEN даёт
+# 1024 и 2048) и детектор antelopev2, который лучше находит МЕЛКИЕ лица — а именно такие у нас
+# на ростовых кадрах. Скачивание мягкое (|| true): недоступный файл не должен ронять весь образ,
+# но ReActor и torch проверяются жёстко ниже — там падение обязано быть.
+RUN set -e; cd /comfyui/models; \
+ mkdir -p facerestore_models insightface/models; \
+ (wget -q -O facerestore_models/GPEN-BFR-512.onnx https://huggingface.co/gmk123/GFPGAN/resolve/main/GPEN-BFR-512.onnx || true); \
+ (wget -q -O facerestore_models/GPEN-BFR-1024.onnx https://huggingface.co/gmk123/GFPGAN/resolve/main/GPEN-BFR-1024.onnx || true); \
+ (wget -q -O facerestore_models/GPEN-BFR-2048.onnx https://huggingface.co/gmk123/GFPGAN/resolve/main/GPEN-BFR-2048.onnx || true); \
+ (wget -q -O facerestore_models/GFPGANv1.4.pth https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth || true); \
+ (wget -q -O /tmp/antelopev2.zip https://huggingface.co/MonsterMMORPG/tools/resolve/main/antelopev2.zip || true); \
+ (cd insightface/models && unzip -o -q /tmp/antelopev2.zip || true); \
+ ls -la facerestore_models | tail -6
 
 # ── ReActor: ТОЧНАЯ пересадка лица (face-swap, InsightFace inswapper) → 100% совпадение лица блогера ──
 # ПОЧЕМУ ЭТОТ БЛОК ВЫГЛЯДИТ ТАК (три грабли, на которых билд падал раньше):
