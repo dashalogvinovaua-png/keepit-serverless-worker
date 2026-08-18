@@ -626,12 +626,93 @@ def run_tts(spec):
     return out
 
 
+def отчёт_о_смерти():
+    """ПОЧЕМУ УМЕР ComfyUI — УЛИКИ, КОТОРЫЕ СНАРУЖИ НЕДОСЯГАЕМЫ (18.08.2026).
+
+    ЗАЧЕМ. У точки 28% брака, и текст отказа один: «ComfyUI недоступен» за 0,8-1,1 с, то есть
+    процесс уже мёртв. Снаружи причина не видна ВООБЩЕ: площадка отдаёт только статус задачи, а
+    журнал старта ComfyUI живёт внутри контейнера, который умирает вместе с ним. Весь день я
+    гадал между двумя версиями (разморозка контейнера и нехватка памяти) — и не мог отличить их
+    ничем, кроме рассуждения. Это и есть та работа, которую прибор обязан делать за меня.
+
+    ГЛАВНАЯ УЛИКА ЗДЕСЬ — ПАМЯТЬ КОНТЕЙНЕРА, А НЕ ЖУРНАЛ. Если ComfyUI убивает ядро за
+    превышение памяти, то `memory.peak` подойдёт к `memory.max` вплотную, а в `memory.events`
+    вырастет счётчик `oom_kill`. Это число, а не догадка: при oom_kill > 0 версия про нехватку
+    памяти становится доказанной, при oom_kill = 0 — закрытой. Врать в утешительную сторону тут
+    нечем: счётчик ведёт ядро, не мы.
+
+    ВСЁ БЕСПЛАТНО. Ни одна строка ниже не занимает карту и не считает: чтение файлов и один
+    вызов nvidia-smi. Наблюдение обязано быть бесплатным, иначе слежка за утечкой сама ею станет.
+    """
+    import glob
+    import subprocess
+
+    ум = {}
+    # ── ПАМЯТЬ КОНТЕЙНЕРА (cgroup v2, а при старом ядре — v1) ──
+    пары = [("предел", "/sys/fs/cgroup/memory.max"), ("пик", "/sys/fs/cgroup/memory.peak"),
+            ("сейчас", "/sys/fs/cgroup/memory.current"),
+            ("предел_v1", "/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+            ("пик_v1", "/sys/fs/cgroup/memory/memory.max_usage_in_bytes")]
+    for имя, путь in пары:
+        try:
+            with open(путь) as f:
+                зн = f.read().strip()
+            ум[имя] = зн if зн == "max" else round(int(зн) / 1e9, 2)
+        except Exception:  # noqa: BLE001
+            pass
+    for путь in ("/sys/fs/cgroup/memory.events", "/sys/fs/cgroup/memory/memory.oom_control"):
+        try:
+            with open(путь) as f:
+                for строка in f:
+                    if "oom" in строка:
+                        ум[строка.split()[0]] = строка.split()[-1]
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ── ЖУРНАЛ СТАРТА ComfyUI: берём САМЫЙ СВЕЖИЙ из вероятных мест ──
+    # Путь у базового образа мы не знаем и НЕ УГАДЫВАЕМ: собираем все .log и берём последний по
+    # времени. Пустой список — это тоже ответ, и он честнее выдуманного пути.
+    журналы = []
+    for шаблон in ("/comfyui/*.log", "/tmp/*.log", "/var/log/*.log", "/workspace/*.log"):
+        журналы += glob.glob(шаблон)
+    хвост = None
+    if журналы:
+        свежий = max(журналы, key=lambda p: os.path.getmtime(p))
+        try:
+            with open(свежий, errors="replace") as f:
+                строки = f.readlines()
+            хвост = {"файл": свежий, "строк": len(строки), "последние": [s.rstrip() for s in строки[-40:]]}
+        except Exception as e:  # noqa: BLE001
+            хвост = {"файл": свежий, "ошибка": str(e)}
+
+    карта = None
+    try:
+        карта = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,memory.used", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=15).stdout.strip()
+    except Exception as e:  # noqa: BLE001
+        карта = "не спросить: %s" % e
+
+    return {
+        "память_ГБ": ум,
+        "процесс_жив": _is_comfyui_process_alive(),
+        "номер_процесса": _get_comfyui_pid(),
+        "журналы_найдены": журналы,
+        "журнал_хвост": хвост,
+        "карта": карта,
+    }
+
+
 def diagnose_nodes(want_classes):
     """Что ComfyUI реально загрузил и на чём споткнулся. Ни генерации, ни GPU."""
     import importlib.util
     import traceback
 
-    out = {"custom_nodes": [], "registered": {}, "import_errors": {}, "pip": {}, "disk": {}}
+    out = {"custom_nodes": [], "registered": {}, "import_errors": {}, "pip": {}, "disk": {},
+           # УЛИКИ О СМЕРТИ ДВИЖКА ЕДУТ В КАЖДОМ ОТВЕТЕ, А НЕ ПО ОТДЕЛЬНОЙ ПРОСЬБЕ: спрашивать
+           # их придётся ровно в тот момент, когда воркер сломан, а тогда второго вызова может
+           # уже не быть — машину заменят (см. refresh_worker ниже).
+           "почему_умер": отчёт_о_смерти()}
     # Сколько места на общем томе и на диске контейнера — по этому решается, куда класть веса.
     try:
         import shutil
