@@ -29,16 +29,48 @@ jobs:
       packages: write       # право писать в GHCR даётся здесь, чужих ключей не требуется
 
     steps:
-      # МЕСТО. У бегунка по умолчанию свободно около 30 ГБ — нашему образу этого мало.
-      # Сносим то, чего в сборке нет и не будет: чужие среды разработки и предзагруженные образы.
-      # Освобождается ещё 25–30 ГБ, и это разница между «собралось» и «нет места на диске».
+      # МЕСТО. Первая попытка (18.08, прогоны 32103254623 и 32103271772) работала СОРОК МИНУТ
+      # и умерла на «No space left on device» — причём умерла так плотно, что бегунок не смог
+      # дописать даже собственный журнал, и от сборки не осталось ни строчки лога.
+      #
+      # Уборки было мало, и вот почему числом: на `/` у бегунка ~73 ГБ, из них после уборки
+      # свободно ~50. Наш образ — базовый worker-comfyui с torch и CUDA (это уже ~20 ГБ
+      # распакованными) плюс CosyVoice, DiffRhythm, ReActor, GPEN, GFPGAN, antelopev2. Buildkit
+      # при сборке держит ОДНОВРЕМЕННО распакованные слои, кэш и итоговый образ — то есть
+      # примерно тройной размер. Пятидесяти гигабайт на это не хватает, и не хватило бы никогда:
+      # дело не в невезении, а в арифметике.
+      #
+      # Лечим двумя разными лекарствами, потому что болезнь одна, а запасов места два.
       - name: Освободить место
         run: |
-          echo "было:"; df -h / | tail -1
+          echo "было:"; df -h / /mnt | tail -3
+          # 1. Сносим чужие среды разработки целиком. `hostedtoolcache` теперь весь, а не
+          #    только CodeQL: там Python, Node, Go, Ruby нескольких версий — нам не нужен ни один,
+          #    сборка идёт ВНУТРИ докера со своими зависимостями.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-                      /usr/lib/jvm /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune -af || true
-          echo "стало:"; df -h / | tail -1
+                      /usr/lib/jvm /opt/hostedtoolcache /usr/share/swift \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/lib/node_modules /opt/az /usr/local/julia* || true
+          sudo apt-get clean || true
+          sudo docker system prune -af --volumes || true
+          echo "стало:"; df -h / /mnt | tail -3
+
+      # 2. И ГЛАВНОЕ: ПЕРЕЕЗЖАЕМ НА ВТОРОЙ ДИСК. У бегунка есть отдельный временный том `/mnt`
+      #    на ~74 ГБ, почти пустой, и докер его не использует вовсе — вся его кухня лежит на `/`.
+      #    Переносим хранилище докера туда и добавляем `/` под кэш buildkit. Уборка сама по себе
+      #    дала бы ещё 25-30 ГБ, но потолок остался бы прежним; переезд поднимает потолок.
+      - name: Перевезти докер на большой диск
+        run: |
+          sudo systemctl stop docker docker.socket containerd || true
+          sudo mkdir -p /mnt/docker
+          printf '{ "data-root": "/mnt/docker" }\n' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker || sudo systemctl start docker.socket docker
+          # ПРОВЕРЯЕМ, А НЕ ВЕРИМ НА СЛОВО: если докер не переехал, сборка снова умрёт через
+          # сорок минут, и мы снова не узнаем почему. Пусть падает здесь, на первой секунде.
+          КОРЕНЬ=$(docker info -f '{{.DockerRootDir}}')
+          echo "хранилище докера: $КОРЕНЬ"
+          test "$КОРЕНЬ" = "/mnt/docker" || { echo "!! докер НЕ переехал — места не хватит"; exit 1; }
+          df -h / /mnt | tail -3
 
       - uses: actions/checkout@v4
 
