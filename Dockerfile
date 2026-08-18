@@ -62,17 +62,41 @@ RUN set -e; cd /comfyui/models; \
 # но не он». Агент фото назвал точный список того, что снимет этот потолок без переписывания его
 # графа: восстановители лица большего разрешения (codeformer у нас работает на 512, GPEN даёт
 # 1024 и 2048) и детектор antelopev2, который лучше находит МЕЛКИЕ лица — а именно такие у нас
-# на ростовых кадрах. Скачивание мягкое (|| true): недоступный файл не должен ронять весь образ,
-# но ReActor и torch проверяются жёстко ниже — там падение обязано быть.
+# на ростовых кадрах.
+#
+# ── ПОЧЕМУ ЗДЕСЬ БОЛЬШЕ НЕТ ГОЛОГО `|| true` (18.08.2026, куплено пустыми файлами) ────────────
+#
+# Было написано: «скачивание мягкое (|| true): недоступный файл не должен ронять весь образ».
+# Довод разумный, а последствие вышло хуже падения. Репозиторий `gmk123/GFPGAN` УМЕР — он отдаёт
+# 404, — и wget честно ничего не скачал. Но `-O` уже создал файл, а `|| true` проглотил отказ, и
+# в образ легли ТРИ ФАЙЛА ПО НОЛЬ БАЙТ с правильными именами. Журнал сборки это даже напечатал
+# («GPEN-BFR-1024.onnx 0»), и никто не прочитал: строка выглядела как успех.
+#
+# Это ровно та ошибка, что описана в правилах фермы: прибор, врущий ТОЛЬКО в сторону «всё хорошо»,
+# не ловится никогда. Отсутствующий файл виден сразу; пустой файл с правильным именем притворяется
+# моделью до первой съёмки, а на воркере роняет ноду при загрузке — и воркер уходит в unhealthy,
+# то есть перестаёт брать задачи вообще.
+#
+# ЛЕЧЕНИЕ ДВОЙНОЕ. Первое — живой источник: у Gourieff (авторский набор ReActor) все три лежат по
+# ~285 МБ, проверено запросом. Второе, и оно важнее: РАЗМЕР СВЕРЯЕТСЯ, и пустой файл УДАЛЯЕТСЯ.
+# Мягкость сохранена там, где она была нужна: образ по-прежнему выходит без недоступной модели —
+# но выходит БЕЗ НЕЁ, а не с её пустой подделкой. «Не скачалось» и «скачалось» снова различимы.
+ARG GPEN_BASE=https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models
 RUN set -e; cd /comfyui/models; \
  mkdir -p facerestore_models insightface/models; \
- (wget -q -O facerestore_models/GPEN-BFR-512.onnx https://huggingface.co/gmk123/GFPGAN/resolve/main/GPEN-BFR-512.onnx || true); \
- (wget -q -O facerestore_models/GPEN-BFR-1024.onnx https://huggingface.co/gmk123/GFPGAN/resolve/main/GPEN-BFR-1024.onnx || true); \
- (wget -q -O facerestore_models/GPEN-BFR-2048.onnx https://huggingface.co/gmk123/GFPGAN/resolve/main/GPEN-BFR-2048.onnx || true); \
+ for f in GPEN-BFR-512.onnx GPEN-BFR-1024.onnx GPEN-BFR-2048.onnx; do \
+   (wget -q -O "facerestore_models/$f" "$GPEN_BASE/$f" || true); \
+   sz=$(stat -c %s "facerestore_models/$f" 2>/dev/null || echo 0); \
+   if [ "$sz" -lt 10000000 ]; then \
+     echo "!! $f не скачался ($sz байт) — УДАЛЯЮ, чтобы пустышка не притворялась моделью"; \
+     rm -f "facerestore_models/$f"; \
+   else echo "ok $f: $sz байт"; fi; \
+ done; \
  (wget -q -O facerestore_models/GFPGANv1.4.pth https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth || true); \
+ [ "$(stat -c %s facerestore_models/GFPGANv1.4.pth 2>/dev/null || echo 0)" -lt 10000000 ] && rm -f facerestore_models/GFPGANv1.4.pth || true; \
  (wget -q -O /tmp/antelopev2.zip https://huggingface.co/MonsterMMORPG/tools/resolve/main/antelopev2.zip || true); \
  (cd insightface/models && unzip -o -q /tmp/antelopev2.zip || true); \
- ls -la facerestore_models | tail -6
+ echo "=== что реально лежит ==="; ls -la facerestore_models
 
 # ── ReActor: ТОЧНАЯ пересадка лица (face-swap, InsightFace inswapper) → 100% совпадение лица блогера ──
 # ПОЧЕМУ ЭТОТ БЛОК ВЫГЛЯДИТ ТАК (три грабли, на которых билд падал раньше):
