@@ -95,8 +95,13 @@ RUN set -e; cd /comfyui/models; \
  (wget -q -O facerestore_models/GFPGANv1.4.pth https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth || true); \
  [ "$(stat -c %s facerestore_models/GFPGANv1.4.pth 2>/dev/null || echo 0)" -lt 10000000 ] && rm -f facerestore_models/GFPGANv1.4.pth || true; \
  (wget -q -O /tmp/antelopev2.zip https://huggingface.co/MonsterMMORPG/tools/resolve/main/antelopev2.zip || true); \
- (cd insightface/models && unzip -o -q /tmp/antelopev2.zip || true); \
- echo "=== что реально лежит ==="; ls -la facerestore_models
+ (cd insightface/models && python3 -c "import zipfile; zipfile.ZipFile('/tmp/antelopev2.zip').extractall('.')" || echo "!! antelopev2 НЕ распакован"); \
+ echo "=== что реально лежит ==="; ls -la facerestore_models; \
+ # ДЕТЕКТОР ПЕЧАТАЕМ ОТДЕЛЬНОЙ СТРОКОЙ. Прошлая сборка была ЗЕЛЁНОЙ, и в её журнале лежало
+ # «/bin/sh: 1: unzip: not found»: архив скачался, но не распаковался, и детектор мелких лиц в
+ # образ не попал. Отказ спрятался за `|| true` ровно так же, как часом раньше спрятались три
+ # пустые модели. Отсутствие должно быть ВИДНО в журнале словами, а не вычисляться из тишины.
+ echo "=== детектор мелких лиц ==="; ls -la insightface/models/antelopev2 2>/dev/null | head -6 || echo "  antelopev2 НЕТ"
 
 # ── ReActor: ТОЧНАЯ пересадка лица (face-swap, InsightFace inswapper) → 100% совпадение лица блогера ──
 # ПОЧЕМУ ЭТОТ БЛОК ВЫГЛЯДИТ ТАК (три грабли, на которых билд падал раньше):
@@ -111,20 +116,35 @@ RUN set -e; cd /comfyui/models; \
 # ФИНАЛЬНАЯ ПРОВЕРКА МЯГКАЯ: если insightface не собрался — образ всё равно выходит, просто БЕЗ ноды
 # (сервис photo это видит и снимает без face-swap). Жёсткий gate здесь вреден: он оставлял в проде
 # СТАРЫЙ образ, и ReActor не появлялся никогда.
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev cmake unzip \
- && rm -rf /var/lib/apt/lists/*
-# onnxruntime-gpu — на нём считается свап (CPU-вариант базового образа сносим, он тянет за собой CPU-провайдер).
-RUN (pip uninstall -y onnxruntime >/dev/null 2>&1 || true); \
-    pip install --no-cache-dir onnxruntime-gpu || pip install --no-cache-dir onnxruntime || true
-RUN pip install --no-cache-dir "cython<3" "setuptools>=68" wheel
-RUN pip install --no-cache-dir --no-build-isolation insightface==0.7.3 \
- || (pip install --no-cache-dir "cython>=3.0" \
-     && pip install --no-cache-dir --no-build-isolation insightface==0.7.3) \
- || echo "!! insightface из исходников не собрался — пробуем без C-расширения"
-# ПОСЛЕДНИЙ ЗАПАСНОЙ ПУТЬ: собираем insightface БЕЗ C-расширения (mesh_core_cython).
-# Оно нужно только 3D-мешам из thirdparty/face3d, а свап лиц (FaceAnalysis + inswapper на onnx)
-# работает и без него. Лучше face-swap без 3D-мешей, чем никакого face-swap.
-RUN if ! python3 -c "import insightface" >/dev/null 2>&1; then \
+# ═══ ОДИН СЛОЙ НА ВЕСЬ ReActor — ПРО МЕСТО НА ДИСКЕ, А НЕ ПРО КРАСОТУ (18.08.2026) ═══
+#
+# Здесь стояло СЕМЬ отдельных RUN, и каждый трогал одни и те же site-packages: сборочный набор,
+# onnxruntime, cython, insightface, нода, две страховки, печать статуса. Docker хранит слои
+# раздельно — файл, изменённый в шести шагах, лежит на диске шесть раз. Сборка умерла с
+# «No space left on device», имея около 110 ГБ свободных: место съели не файлы образа, а слои.
+#
+# СБОРОЧНЫЙ НАБОР СНОСИТСЯ ВНУТРИ ЭТОГО ЖЕ СЛОЯ, и это не придирка к стилю. Снос отдельным
+# шагом в хвосте не вернул бы НИ ОДНОГО байта: удаление в верхнем слое не освобождает место,
+# занятое нижним, — оно лишь дописывает пометку «файла больше нет». Освобождает только то,
+# что вообще не дожило до записи слоя.
+#
+# ЧЕГО ЗДЕСЬ НЕ СЛУЧИЛОСЬ: ни один шаг не выкинут, ни одна страховка не ослаблена, порядок тот
+# же. Жёсткость шагов сохранена ЯВНО — там, где падение раньше роняло сборку (apt и cython),
+# теперь стоит `|| exit 1`, а где стояло `|| echo`, там оно и осталось. Без этого слияние тихо
+# превратило бы жёсткие шаги в мягкие, и образ выходил бы «зелёным» без ReActor.
+#
+# `unzip` из набора убран: распаковка моделей ниже переведена на python (см. следующий шаг).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential python3-dev cmake \
+ && rm -rf /var/lib/apt/lists/* || exit 1; \
+    (pip uninstall -y onnxruntime >/dev/null 2>&1 || true); \
+    pip install --no-cache-dir onnxruntime-gpu || pip install --no-cache-dir onnxruntime || true; \
+    pip install --no-cache-dir "cython<3" "setuptools>=68" wheel || exit 1; \
+    ( pip install --no-cache-dir --no-build-isolation insightface==0.7.3 \
+      || (pip install --no-cache-dir "cython>=3.0" \
+          && pip install --no-cache-dir --no-build-isolation insightface==0.7.3) \
+      || echo "!! insightface из исходников не собрался — пробуем без C-расширения" ); \
+    if ! python3 -c "import insightface" >/dev/null 2>&1; then \
       mkdir -p /tmp/insf && cd /tmp/insf \
       && (pip download insightface==0.7.3 --no-deps --no-binary :all: -d . \
           && tar xzf insightface-0.7.3.tar.gz && cd insightface-0.7.3 \
@@ -134,12 +154,8 @@ RUN if ! python3 -c "import insightface" >/dev/null 2>&1; then \
                     -e 's/^ext_modules *=.*/ext_modules = []/' setup.py \
           && pip install --no-cache-dir --no-build-isolation . ) \
       || echo "!! insightface НЕ СОБРАЛСЯ ВООБЩЕ — образ поедет без ReActor"; \
-    fi
-# Ноду ставим ТОЛЬКО если insightface реально импортится: сломанная нода роняет ComfyUI на старте
-# (так уже было с comfyui_controlnet_aux — воркер уходил в unhealthy и не брал джобы).
-# Из requirements ReActor выкидываем numpy и opencv-python: numpy сломал бы ABI собранного расширения,
-# а opencv-python конфликтует с уже стоящим opencv-python-headless.
-RUN if python3 -c "import insightface, onnxruntime" >/dev/null 2>&1; then \
+    fi; \
+    if python3 -c "import insightface, onnxruntime" >/dev/null 2>&1; then \
       cd /comfyui/custom_nodes \
       && (git clone --depth 1 https://github.com/Gourieff/ComfyUI-ReActor.git \
           || git clone --depth 1 https://codeberg.org/Gourieff/comfyui-reactor.git ComfyUI-ReActor) \
@@ -147,17 +163,24 @@ RUN if python3 -c "import insightface, onnxruntime" >/dev/null 2>&1; then \
       && grep -viE '^(numpy|opencv-python)([<>=!].*)?$' ComfyUI-ReActor/requirements.txt > /tmp/reactor-req.txt \
       && (pip install --no-cache-dir -r /tmp/reactor-req.txt || true) \
       && echo "REACTOR: нода установлена" > /reactor_status.txt; \
-    else echo "REACTOR: insightface не собрался — ноды нет" > /reactor_status.txt; fi
-# Страховка: если requirements ноды всё-таки поломали insightface — ноду убираем, образ остаётся живым.
-RUN if [ -d /comfyui/custom_nodes/ComfyUI-ReActor ] && ! python3 -c "import insightface" >/dev/null 2>&1; then \
+    else echo "REACTOR: insightface не собрался — ноды нет" > /reactor_status.txt; fi; \
+    if [ -d /comfyui/custom_nodes/ComfyUI-ReActor ] && ! python3 -c "import insightface" >/dev/null 2>&1; then \
       rm -rf /comfyui/custom_nodes/ComfyUI-ReActor; \
-      echo "REACTOR: insightface сломался после requirements — нода убрана" > /reactor_status.txt; fi
-RUN cat /reactor_status.txt
+      echo "REACTOR: insightface сломался после requirements — нода убрана" > /reactor_status.txt; fi; \
+    cat /reactor_status.txt; \
+    rm -rf /tmp/insf /tmp/reactor-req.txt; \
+    apt-get purge -y build-essential python3-dev cmake >/dev/null 2>&1 || true; \
+    apt-get autoremove -y >/dev/null 2>&1 || true; \
+    rm -rf /var/lib/apt/lists/*
 # Модели ReActor В ОБРАЗ: inswapper (свап-модель) + buffalo_l (детекция/распознавание лиц).
+# Распаковка — штатным python, а НЕ apt-пакетом `unzip`. Так этот шаг перестаёт зависеть от
+# сборочного набора, который слоем выше ставится и тут же сносится.
 RUN set -e; mkdir -p /comfyui/models/insightface/models; cd /comfyui/models/insightface; \
  (wget -q -O inswapper_128.onnx https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx || true); \
  (cd models && wget -q -O buffalo_l.zip https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
-   && mkdir -p buffalo_l && (cd buffalo_l && unzip -oq ../buffalo_l.zip) && rm -f buffalo_l.zip || true)
+   && mkdir -p buffalo_l \
+   && python3 -c "import zipfile; zipfile.ZipFile('buffalo_l.zip').extractall('buffalo_l')" \
+   && rm -f buffalo_l.zip || true)
 
 # ── ЗВУК ЖИВЁТ В ОТДЕЛЬНОМ ОКРУЖЕНИИ, А НЕ ЗДЕСЬ ────────────────────────────
 # Прошлый заход ставил зависимости аудио-нод в ОБЩЕЕ окружение ComfyUI. Итог виден фактом: на
@@ -202,24 +225,20 @@ ENV HF_HUB_DISABLE_XET=1
 # сломает соседа. Этот урок ферма уже оплатила дважды: один раз звуком в окружении ComfyUI.
 # Поэтому у каждого движка свой интерпретатор, а handler зовёт нужный (см. ENGINE_PY в handler.py).
 # Встретиться они не могут физически: разные процессы.
+# ОДИН СЛОЙ НА ВСЁ ОКРУЖЕНИЕ (18.08.2026): было три RUN подряд, и каждый переписывал одни и те
+# же site-packages внутри /opt/higgs-venv. Порядок и все ступеньки отката сохранены дословно.
 RUN python3 -m venv --copies /opt/higgs-venv \
  && /opt/higgs-venv/bin/pip install --no-cache-dir --upgrade pip \
- && echo "HIGGS: отдельное окружение /opt/higgs-venv готово"
-
-# torch под transformers 4.46. В базовом образе Python 3.12 — колёса 2.5.1+cu124 для него есть.
-# Ступеньки вниз на случай, если версию уберут: лучше движок на процессоре, чем пустое место.
-RUN /opt/higgs-venv/bin/pip install --no-cache-dir torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
- || /opt/higgs-venv/bin/pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124 \
- || /opt/higgs-venv/bin/pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu124 \
- || echo "!! HIGGS: torch не встал — движок не поедет, остальное не тронуто"
-
-# transformers ПРИБИТ к 4.46.3: это последняя версия, где ещё есть внутренности, на которые
-# опирается код v2. numpy держим ниже двойки — под ним собран весь этот слой.
-RUN /opt/higgs-venv/bin/pip install --no-cache-dir \
+ && echo "HIGGS: отдельное окружение /opt/higgs-venv готово" \
+ && ( /opt/higgs-venv/bin/pip install --no-cache-dir torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
+   || /opt/higgs-venv/bin/pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124 \
+   || /opt/higgs-venv/bin/pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu124 \
+   || echo "!! HIGGS: torch не встал — движок не поедет, остальное не тронуто" ) \
+ && ( /opt/higgs-venv/bin/pip install --no-cache-dir \
       "transformers==4.46.3" "numpy<2" "accelerate>=0.26.0" \
       librosa dacite pandas loguru vector_quantize_pytorch omegaconf pydantic \
       json_repair langid jieba pydub click \
- || echo "!! HIGGS: зависимости не встали"
+   || echo "!! HIGGS: зависимости не встали" )
 
 # Код Higgs v2 ПРИБИТ К КОММИТУ. В `main` репозиторий уже развёрнут на v3 (последний коммит так
 # и называется: «point README to Higgs Audio v3, archive v2 guide»), и код v2 там держится на
@@ -298,8 +317,12 @@ RUN cd /opt/cosyvoice \
  && grep -vE "tensorrt|deepspeed|gradio|tensorboard|fastapi|uvicorn|grpcio|openai-whisper" requirements.txt > /tmp/req.txt \
  && /opt/cosy3-venv/bin/pip install --no-cache-dir openai-whisper \
  && /opt/cosy3-venv/bin/pip install --no-cache-dir -r /tmp/req.txt \
- && /opt/cosy3-venv/bin/pip install --no-cache-dir torch==2.4.1 torchaudio==2.4.1 \
-      --index-url https://download.pytorch.org/whl/cu124 \
+ && /opt/cosy3-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
+      --index-url https://download.pytorch.org/whl/cu128 \
+ && /opt/cosy3-venv/bin/pip install --no-cache-dir "setuptools<81" wheel \
+ && /opt/cosy3-venv/bin/python -c "\
+import torch;\
+print('COSY3 torch:', torch.__version__, 'собран под', torch.cuda.get_arch_list())" \
  && echo /opt/cosyvoice > "$(/opt/cosy3-venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/cosyvoice.pth" \
  && echo /opt/cosyvoice/third_party/Matcha-TTS >> "$(/opt/cosy3-venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/cosyvoice.pth" \
  || echo "!! COSY3: зависимости не встали"
@@ -339,31 +362,16 @@ print('COSY3: ресурсы wetext:', snapshot_download('pengzhendong/wetext'))
 # Проверка теперь МЯГКАЯ (|| echo). Жёсткий gate здесь стоит дороже, чем помогает: он платит
 # целой пересборкой за то, что проба голосом ловит за секунды. Настоящий воротарь у нас —
 # прогон живого голоса на ферме, он уже поймал этот самый pkg_resources, когда диагноз молчал.
-RUN /opt/cosy3-venv/bin/pip install --no-cache-dir "setuptools<81" wheel \
- && echo "COSY3: setuptools поставлен"
-
-# ── TORCH ПОД BLACKWELL (sm_120) ────────────────────────────────────────────
-# ИЗМЕРЕНО НА ВОРКЕРЕ, А НЕ УГАДАНО. Первая речь на ферме получилась, но считалась на процессоре:
-# движок падал с «no kernel image is available for execution on the device». Самопроверка железа
-# показала ровно, в чём дело:
-#     карта      NVIDIA RTX PRO 6000 Blackwell, capability 12.0  → это sm_120
-#     torch      2.4.1+cu124, собран под sm_50 … sm_90           → sm_120 в этом списке НЕТ
-# Значит карта исправна, движок исправен, а ядер под неё в нашем torch просто не существует.
-# Ядра sm_120 появились в CUDA 12.8, то есть в колёсах torch 2.7 и новее.
+# setuptools<81 и torch под Blackwell ПЕРЕЕХАЛИ В СЛОЙ ЗАВИСИМОСТЕЙ ВЫШЕ (18.08.2026).
 #
-# ЦЕНА ВОПРОСА, чтобы это не считали мелочью: на процессоре те же три фразы считались 320 секунд
-# против 80 на поде — вчетверо дольше и ровно вчетверо дороже на каждой фразе.
+# Здесь они стояли ОТДЕЛЬНЫМИ шагами намеренно: дешёвая правка в хвосте не обесценивает кеш
+# тяжёлых слоёв, и однажды это спасло сборку от падения по тридцатиминутному пределу. Довод был
+# верный, но он про ВРЕМЯ, а умерли мы от МЕСТА: отдельный слой с torch 2.7.1 означает, что
+# torch 2.4.1 из слоя зависимостей остаётся на диске целиком, хотя не работает ни секунды.
+# Два таких мёртвых torch (здесь и у DiffRhythm) — это и есть те гигабайты, которых не хватило.
 #
-# ПОЧЕМУ ОТДЕЛЬНЫМ ШАГОМ В ХВОСТЕ, а не правкой строки выше. Строка установки torch стоит ДО
-# скачивания десяти гигабайт весов, и правка там обесценила бы весь кеш — сборка не уложилась бы
-# в предел, это мы уже проходили на 35-й минуте. Здесь мы просто переставляем torch поверх, и
-# пересборка трогает только хвост. Когда весам найдётся место на томе, шаги сольются в один.
-RUN /opt/cosy3-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
-      --index-url https://download.pytorch.org/whl/cu128 \
- && /opt/cosy3-venv/bin/python -c "\
-import torch;\
-print('COSY3 torch:', torch.__version__, 'собран под', torch.cuda.get_arch_list())" \
- || echo "!! COSY3: torch под Blackwell не встал — движок опять уйдёт на процессор"
+# Что при этом теряется, говорю прямо: пересборка теперь трогает и скачивание весов (~10 ГБ),
+# то есть время сборки растёт. Размен сознательный — место кончилось, а время пока нет.
 
 # ── ЖЁСТКИЕ ВОРОТА COSYVOICE 3 ──────────────────────────────────────────────
 # ГДЕ ГЕЙТ, А ГДЕ ЕГО БЫТЬ НЕ ДОЛЖНО. Мягкие шаги сегодня дважды выпустили «зелёный» образ,
@@ -477,17 +485,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends espeak-ng \
  && echo "DIFFRHYTHM: окружение готово"
 
 ARG DIFFRHYTHM_CODE=main
+# ОДИН СЛОЙ: КОД, ЗАВИСИМОСТИ И torch ПОД BLACKWELL (18.08.2026).
+# Было два RUN подряд: первый ставил зависимости, а с ними torch под cu124, второй клал поверх
+# torch 2.7.1 под cu128. Разные слои — значит НА ДИСКЕ ЛЕЖАЛИ ОБА, а работает только второй.
+# Порядок внутри слоя тот же, что был: сначала requirements, потом torch поверх, — поэтому
+# результат в образе не меняется ни на файл, меняется только то, что промежуточный torch
+# больше не доживает до отдельного слоя.
 RUN git clone -q https://github.com/ASLP-lab/DiffRhythm.git /opt/diffrhythm \
  && rm -rf /opt/diffrhythm/.git \
  && /opt/diffrhythm-venv/bin/pip install --no-cache-dir -r /opt/diffrhythm/requirements.txt \
- || echo "!! DIFFRHYTHM: зависимости не встали"
-
-# torch ПОД BLACKWELL: их requirements тянут пару под cu124, но ферме выдают RTX PRO 6000
-# (sm_120), а ядер под неё нет до CUDA 12.8. Ставим поверх — иначе движок уйдёт на процессор,
-# как это уже было с речью и стоило нам вчетверо.
-RUN /opt/diffrhythm-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
+ && /opt/diffrhythm-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
       --index-url https://download.pytorch.org/whl/cu128 \
- || echo "!! DIFFRHYTHM: torch под Blackwell не встал"
+ || echo "!! DIFFRHYTHM: зависимости или torch под Blackwell не встали"
 
 # ВЕСА. Движок кладёт их в ./pretrained ОТНОСИТЕЛЬНО ТЕКУЩЕГО КАТАЛОГА — та же ловушка, что была
 # с tts_uk. Поэтому качаем строго из /opt/diffrhythm, и работник потом запускается оттуда же.
