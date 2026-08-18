@@ -313,7 +313,26 @@ RUN git clone --recursive -q https://github.com/FunAudioLLM/CosyVoice.git /opt/c
 
 # Тяжёлое и ненужное для счёта выкидываем: tensorrt, deepspeed, gradio, tensorboard и веб-морда
 # нужны обучению и демо, а нам — только синтез. Это и место в образе, и минуты сборки.
-RUN cd /opt/cosyvoice \
+# КОМПИЛЯТОР НУЖЕН ЗДЕСЬ, И ЭТО ИЗМЕРЕНО, А НЕ ПРЕДПОЛОЖЕНО (18.08.2026).
+#
+# ЧЕМ КУПЛЕНО: сборка 32116099974 упала на шаге 22 из 33 — `pyworld` не собрал колесо, за ним
+# не встали зависимости CosyVoice, и ворота честно не выпустили немой образ. Причина — моя:
+# сведя установку и снос сборочных пакетов в один слой (выше, у ReActor), я убрал компилятор
+# РАНЬШЕ этого места. Прежде он доживал сюда случайно — просто потому, что не сносился вовсе.
+#
+# ПОЧЕМУ НЕ ГОТОВЫМ КОЛЕСОМ. Проверил у PyPI: у `pyworld` под cp312+linux колёс НЕТ НИ В ОДНОЙ
+# версии (0.3.4 — восемь колёс, 0.3.5 — десять, среди них ни одного нашего). Только исходники.
+# Значит вариант «поставить колесом» закрыт не мнением, а фактом.
+#
+# ПОЧЕМУ НЕ ПЕРЕНЕСТИ СНОС В ПОСЛЕДНИЙ НУЖДАЮЩИЙСЯ СЛОЙ. Это вернуло бы ровно ту беду, от
+# которой мы уходим: байты build-essential записались бы наверху, у ReActor, а снос внизу лишь
+# дописал бы пометку «файла нет». Освобождает только то, что не дожило до записи слоя, — значит
+# ставить и сносить надо В КАЖДОМ слое, который компилирует. Цена — лишний apt (меньше минуты),
+# плата — ноль байт на диске.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential python3-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && cd /opt/cosyvoice \
  && grep -vE "tensorrt|deepspeed|gradio|tensorboard|fastapi|uvicorn|grpcio|openai-whisper" requirements.txt > /tmp/req.txt \
  && /opt/cosy3-venv/bin/pip install --no-cache-dir openai-whisper \
  && /opt/cosy3-venv/bin/pip install --no-cache-dir -r /tmp/req.txt \
@@ -325,7 +344,10 @@ import torch;\
 print('COSY3 torch:', torch.__version__, 'собран под', torch.cuda.get_arch_list())" \
  && echo /opt/cosyvoice > "$(/opt/cosy3-venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/cosyvoice.pth" \
  && echo /opt/cosyvoice/third_party/Matcha-TTS >> "$(/opt/cosy3-venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/cosyvoice.pth" \
- || echo "!! COSY3: зависимости не встали"
+ || echo "!! COSY3: зависимости не встали"; \
+    apt-get purge -y build-essential python3-dev >/dev/null 2>&1 || true; \
+    apt-get autoremove -y >/dev/null 2>&1 || true; \
+    rm -rf /var/lib/apt/lists/*
 
 # Веса. ~10 ГБ — это МНОГО при тридцатиминутном пределе сборки. Базовая сборка сейчас укладывается
 # в семь минут, поэтому запас есть, но он не бесконечен: если сборка начнёт падать по таймауту,
@@ -372,6 +394,37 @@ print('COSY3: ресурсы wetext:', snapshot_download('pengzhendong/wetext'))
 #
 # Что при этом теряется, говорю прямо: пересборка теперь трогает и скачивание весов (~10 ГБ),
 # то есть время сборки растёт. Размен сознательный — место кончилось, а время пока нет.
+
+# ── РЕГИСТРАЦИЯ КОДА CosyVoice — ОТДЕЛЬНЫМ ДЕШЁВЫМ ШАГОМ ПЕРЕД ВОРОТАМИ ──────
+#
+# ЧЕМ КУПЛЕНО: сборка 32116099974, шаг 22/33, «ModuleNotFoundError: No module named cosyvoice»
+# на воротах. Корень был не здесь — не собрался `pyworld`, и он уже починен выше (компилятор
+# вернулся в свой слой). Но эта сборка вскрыла ВТОРУЮ беду, которая переживёт починку pyworld.
+#
+# В ЧЁМ ОНА. Два `.pth`, которыми код показывается окружению, стоят в ХВОСТЕ длинной цепочки
+# `&&` вместе с установкой зависимостей. Падает любое звено цепи — `.pth` просто не пишутся,
+# шаг уходит в `|| echo` и рапортует дальше как ни в чём не бывало. Узнаём мы об этом через
+# шестьдесят строк, на воротах, и совсем другими словами: «нет модуля cosyvoice» вместо
+# «не собрался pyworld». Ошибка на пути к успеху промолчала — ровно то, за что ферма сегодня
+# заплатила полтора доллара на другом приборе.
+#
+# ПОЧЕМУ ПРАВКА ЗДЕСЬ, А НЕ НАВЕРХУ. Наверху лежат десять гигабайт весов; правка до них
+# обесценит их слой, и сборка не уложится в предел — это ферма уже проходила на 35-й минуте.
+# Здесь же два `echo` стоят ноль и кеш не трогают.
+#
+# ЧТО ЭТОТ ШАГ ДЕЛАЕТ И ЧЕГО НЕ ДЕЛАЕТ. Он ПИШЕТ регистрацию безусловно и, если импорт всё
+# равно не идёт, НАЗЫВАЕТ ПЕРВЫЙ НЕДОСТАЮЩИЙ МОДУЛЬ ПОИМЁННО. Он НЕ смягчает ворота и ничего
+# не чинит молча: судить остаются ворота ниже, а этот шаг лишь заставляет отказ говорить правду.
+RUN SP="$(/opt/cosy3-venv/bin/python -c 'import site; print(site.getsitepackages()[0])')" \
+ && echo /opt/cosyvoice > "$SP/cosyvoice.pth" \
+ && echo /opt/cosyvoice/third_party/Matcha-TTS >> "$SP/cosyvoice.pth" \
+ && echo "COSY3: регистрация кода переписана: $SP/cosyvoice.pth" \
+ && /opt/cosy3-venv/bin/python -c "\
+import importlib.util as u, sys;\
+нет=[m for m in ('cosyvoice','matcha','pyworld','hydra','hyperpyyaml','wetext','onnxruntime','torch','transformers','diffusers','lightning') if not u.find_spec(m)];\
+print('COSY3 ДИАГНОЗ: не хватает —', ', '.join(нет) if нет else 'ничего, все модули на месте');\
+sys.exit(0)"
+
 
 # ── ЖЁСТКИЕ ВОРОТА COSYVOICE 3 ──────────────────────────────────────────────
 # ГДЕ ГЕЙТ, А ГДЕ ЕГО БЫТЬ НЕ ДОЛЖНО. Мягкие шаги сегодня дважды выпустили «зелёный» образ,
@@ -491,17 +544,24 @@ ARG DIFFRHYTHM_CODE=main
 # Порядок внутри слоя тот же, что был: сначала requirements, потом torch поверх, — поэтому
 # результат в образе не меняется ни на файл, меняется только то, что промежуточный torch
 # больше не доживает до отдельного слоя.
-RUN git clone -q https://github.com/ASLP-lab/DiffRhythm.git /opt/diffrhythm \
+# КОМПИЛЯТОР ЖИВЁТ И УМИРАЕТ ВНУТРИ ЭТОГО СЛОЯ (18.08.2026).
+# Замер по колёсам PyPI говорит, что здесь он, скорее всего, не нужен: `pylance` есть под
+# cp39-abi3 manylinux, `bitsandbytes` — py3-none-manylinux, а два пакета без колёс (`jieba`,
+# `muq`) чистый python и компиляции не требуют. Ставлю всё равно, и вот почему: «скорее всего»
+# здесь стоит одиннадцать минут сборки, а страховка — сорок секунд apt и НОЛЬ байт на диске,
+# потому что пакеты сносятся в этом же слое и до его записи не доживают. Размен очевиден.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential python3-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && git clone -q https://github.com/ASLP-lab/DiffRhythm.git /opt/diffrhythm \
  && rm -rf /opt/diffrhythm/.git \
  && /opt/diffrhythm-venv/bin/pip install --no-cache-dir -r /opt/diffrhythm/requirements.txt \
  && /opt/diffrhythm-venv/bin/pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
       --index-url https://download.pytorch.org/whl/cu128 \
- || echo "!! DIFFRHYTHM: зависимости или torch под Blackwell не встали"
-
-# ВЕСА. Движок кладёт их в ./pretrained ОТНОСИТЕЛЬНО ТЕКУЩЕГО КАТАЛОГА — та же ловушка, что была
-# с tts_uk. Поэтому качаем строго из /opt/diffrhythm, и работник потом запускается оттуда же.
-#
-# КАЧАЕМ ФАЙЛАМИ, А НЕ ЧЕРЕЗ `MuQMuLan.from_pretrained`. Прошлая сборка упала именно здесь:
+ || echo "!! DIFFRHYTHM: зависимости или torch под Blackwell не встали"; \
+    apt-get purge -y build-essential python3-dev >/dev/null 2>&1 || true; \
+    apt-get autoremove -y >/dev/null 2>&1 || true; \
+    rm -rf /var/lib/apt/lists/*
 # from_pretrained СНАЧАЛА импортирует пакет `muq`, а он писан под torchaudio 2.6, тогда как нам
 # для карты Blackwell нужен 2.7 — и импорт валится ещё до первого байта весов. Скачивание файлов
 # импорта не требует вовсе, а работнику при счёте они лягут по тем же путям.
